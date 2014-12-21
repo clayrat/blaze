@@ -27,8 +27,8 @@ package object http20 {
     val CONTINUATION  = 0x9.toByte
   }
 
-  type SettingKey = Short
-  type SettingValue = Int
+  type SettingKey = Int
+  type SettingValue = Long
   case class Setting(key: SettingKey, value: SettingValue)
 
   object SettingsKeys {
@@ -63,7 +63,8 @@ package object http20 {
 
   sealed trait DecoderResult
 
-  case object Success extends DecoderResult
+  case object Continue extends DecoderResult
+  case object Halt extends DecoderResult
   case object BufferUnderflow extends DecoderResult
 
   case class Error(err: Http2Exception) extends DecoderResult

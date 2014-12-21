@@ -2,30 +2,24 @@ package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
 
-import com.twitter.hpack.{Decoder, HeaderListener}
 import org.http4s.blaze.util.BufferTools
 
-trait HeaderBuilder[Result] extends HeaderListener {
-
-  /** Returns the header collection and clears this builder */
-  def result(): Result
-}
-
-abstract class HeaderDecodingFrameHandler(maxHeaderSize: Int) extends FrameHandler {
+/** This class is not 'thread safe' and should be used in a
+  * synchronized block or within a single thread */
+abstract class HeaderDecodingFrameHandler extends FrameHandler {
 
   type HeaderType
 
+  protected val headerDecoder: HeaderDecoder[HeaderType]
+
   private case class HeadersInfo(sId: Int, sDep: Int, ex: Boolean, priority: Int, end_stream: Boolean, isPromise: Boolean, var buffer: ByteBuffer)
 
-  private val headerDecoder = new Decoder(maxHeaderSize, maxHeaderSize)
-
-  private var hBuilder: HeaderBuilder[HeaderType] = null
   private var hInfo: HeadersInfo = null
 
 
   ///////////////////////////////////////////////////////////////////////////
-
-  def getHeaderBuilder(): HeaderBuilder[HeaderType]
+  
+  def setMaxHeaderTableSize(maxSize: Int): Unit = { headerDecoder.setMaxTableSize(maxSize) }
 
   def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_stream: Boolean): DecoderResult
 
@@ -35,7 +29,7 @@ abstract class HeaderDecodingFrameHandler(maxHeaderSize: Int) extends FrameHandl
 
   ////////////////////////////////////////////////////////////////////////////
 
-  override def inHeaderSequence(): Boolean = hBuilder != null
+  override def inHeaderSequence(): Boolean = !headerDecoder.empty()
 
   final override def onHeadersFrame(streamId: Int,
                                   streamDep: Int,
@@ -49,19 +43,15 @@ abstract class HeaderDecodingFrameHandler(maxHeaderSize: Int) extends FrameHandl
       return Error(PROTOCOL_ERROR("Received HEADERS frame while in in headers sequence"))
     }
 
-    val builder = getHeaderBuilder()
-
-    decodeBuffer(buffer, builder)
+    headerDecoder.decode(buffer)
 
     if (end_headers) {
-      headerDecoder.endHeaderBlock()
-      val hs = builder.result()
+      val hs = headerDecoder.result()
       onCompleteHeadersFrame(hs, streamId, streamDep, exclusive, priority, end_stream)
     }
     else {
-      hBuilder = builder
       hInfo = HeadersInfo(streamId, streamDep, exclusive, priority, end_stream, false, buffer)
-      Success
+      Continue
     }
   }
 
@@ -71,19 +61,15 @@ abstract class HeaderDecodingFrameHandler(maxHeaderSize: Int) extends FrameHandl
       return Error(PROTOCOL_ERROR("Received HEADERS frame while in in headers sequence"))
     }
 
-    val builder = getHeaderBuilder()
-
-    decodeBuffer(buffer, builder)
+    headerDecoder.decode(buffer)
 
     if (end_headers) {
-      headerDecoder.endHeaderBlock()
-      val hs = builder.result()
+      val hs = headerDecoder.result()
       onCompletePushPromiseFrame(hs, streamId, promisedId)
     }
     else {
-      hBuilder = builder
       hInfo = HeadersInfo(streamId, promisedId, false, -1, false, true, buffer)
-      Success
+      Continue
     }
   }
 
@@ -95,24 +81,19 @@ abstract class HeaderDecodingFrameHandler(maxHeaderSize: Int) extends FrameHandl
 
     val newBuffer = BufferTools.concatBuffers(hInfo.buffer, buffer)
 
-    decodeBuffer(newBuffer, hBuilder)
+    headerDecoder.decode(newBuffer)
     
     if (end_headers) {
-      headerDecoder.endHeaderBlock()
-
-      val hs = hBuilder.result()
+      val hs = headerDecoder.result()
       val info = hInfo
-      hBuilder = null; hInfo = null;
+      hInfo = null;
 
       if (info.isPromise) onCompletePushPromiseFrame(hs, streamId, info.sDep)
       else onCompleteHeadersFrame(hs, streamId, info.sDep, info.ex, info.priority, info.end_stream)
     }
     else {
       hInfo.buffer = newBuffer
-      Success
+      Continue
     }
   }
-
-  private def decodeBuffer(buffer: ByteBuffer, builder: HeaderListener): Unit =
-    headerDecoder.decode(new ByteBufferInputStream(buffer), builder)
 }

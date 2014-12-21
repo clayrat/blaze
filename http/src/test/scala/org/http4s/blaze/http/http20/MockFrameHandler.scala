@@ -12,8 +12,7 @@ class MockFrameHandler(inHeaders: Boolean) extends FrameHandler {
   override def onExtensionFrame(tpe: Int, streamId: Int, flags: Byte, data: ByteBuffer): DecoderResult = ???
   override def onHeadersFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_headers: Boolean, end_stream: Boolean, buffer: ByteBuffer): DecoderResult = ???
 
-  // Each setting is handled one at a time. false signals the decoding process to halt
-  override def handleSetting(id: Int, value: Long): DecoderResult = ???
+  override def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): DecoderResult = ???
   override def onRstStreamFrame(streamId: Int, code: Int): DecoderResult = ???
   override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): DecoderResult = ???
   override def onContinuationFrame(streamId: Int, endHeaders: Boolean, data: ByteBuffer): DecoderResult = ???

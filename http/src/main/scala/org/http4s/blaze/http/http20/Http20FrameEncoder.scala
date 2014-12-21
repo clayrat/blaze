@@ -107,7 +107,7 @@ trait Http20FrameEncoder {
   }
 
   def mkSettingsFrame(ack: Boolean, settings: Seq[Setting]): ByteBuffer = {
-    require(!ack || settings.nonEmpty, "Setting acknowledgement must be empty")
+    require(!ack || settings.isEmpty, "Setting acknowledgement must be empty")
 
     val size = settings.length * 6
 
@@ -116,7 +116,7 @@ trait Http20FrameEncoder {
 
     writeFrameHeader(size, FrameTypes.SETTINGS, flags.toByte, 0, buffer)
 
-    if (!ack) settings.foreach { case Setting(k,v) => buffer.putShort(k).putInt(v) }
+    if (!ack) settings.foreach { case Setting(k,v) => buffer.putShort(k.toShort).putInt(v.toInt) }
 
     buffer.flip()
     buffer

@@ -55,24 +55,24 @@ class Http20FrameCodecSpec extends Specification {
 
     def dec(sId: Int, isL: Boolean) = decoder(new MockFrameHandler(false) {
       override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer): DecoderResult = {
-        if (streamId == sId && isLast == isL && compare(data::Nil, dat::Nil)) Success
+        if (streamId == sId && isLast == isL && compare(data::Nil, dat::Nil)) Continue
         else sys.error("Fail.")
       }
     })
 
     "make round trip" in {
       val buff1 = joinBuffers(encoder.mkDataFrame(dat, 1, true, 0))
-      dec(1, true).decodeBuffer(buff1) must_== Success
+      dec(1, true).decodeBuffer(buff1) must_== Continue
     }
 
     "Decode 'END_STREAM flag" in {
       val buff2 = joinBuffers(encoder.mkDataFrame(dat, 3, false, 100))
-      dec(3, false).decodeBuffer(buff2) must_== Success
+      dec(3, false).decodeBuffer(buff2) must_== Continue
     }
 
     "Decode padded buffers" in {
       val buff3 = addBonus(encoder.mkDataFrame(dat, 1, true, 100))
-      dec(1, true).decodeBuffer(buff3) must_== Success
+      dec(1, true).decodeBuffer(buff3) must_== Continue
       buff3.remaining() must_== bonusSize
     }
 
@@ -92,28 +92,30 @@ class Http20FrameCodecSpec extends Specification {
                                     end_headers: Boolean,
                                     end_stream: Boolean,
                                     buffer: ByteBuffer): DecoderResult = {
-          assert(sId == streamId)
-          assert(sDep == streamDep)
-          assert(ex == exclusive)
-          assert(p == priority)
-          assert(end_h == end_headers)
-          assert(end_s == end_stream)
+          sId must_== streamId
+          sDep must_== streamDep
+          ex must_== exclusive
+          p must_== priority
+          end_h must_== end_headers
+          end_s must_== end_stream
           assert(compare(buffer::Nil, dat::Nil))
-          Success
+          Continue
         }
     })
 
     "make round trip" in {
       val buff1 = joinBuffers(encoder.mkHeaderFrame(dat, 1, 1, false, 1, true, true, 0))
-      dec(1, 1, false, 1, true, true).decodeBuffer(buff1) must_== Success
+      dec(1, 1, false, 1, true, true).decodeBuffer(buff1) must_== Continue
+      buff1.remaining() must_== 0
 
       val buff2 = joinBuffers(encoder.mkHeaderFrame(dat, 2, 3, false, 6, true, false, 0))
-      dec(2, 3, false, 6, true, false).decodeBuffer(buff2) must_== Success
+      dec(2, 3, false, 6, true, false).decodeBuffer(buff2) must_== Continue
+      buff2.remaining() must_== 0
     }
 
     "preserve padding" in {
       val buff = addBonus(encoder.mkHeaderFrame(dat, 1, 1, false, 1, true, true, 0))
-      dec(1, 1, false, 1, true, true).decodeBuffer(buff) must_== Success
+      dec(1, 1, false, 1, true, true).decodeBuffer(buff) must_== Continue
       buff.remaining() must_== bonusSize
     }
 
@@ -135,20 +137,22 @@ class Http20FrameCodecSpec extends Specification {
     def dec(sId: Int, sDep: Int, ex: Boolean, p: Int) =
       decoder(new MockFrameHandler(false) {
         override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): DecoderResult = {
-          assert(sId == streamId)
-          assert(sDep == streamDep)
-          assert(ex == exclusive)
-          assert(p == priority)
-          Success
+          sId must_== streamId
+          sDep must_== streamDep
+          ex must_== exclusive
+          p must_== priority
+          Continue
         }
       })
 
     "make a round trip" in {
       val buff1 = encoder.mkPriorityFrame(1, 1, true, 1)
-      dec(1, 1, true, 1).decodeBuffer(buff1) must_== Success
+      dec(1, 1, true, 1).decodeBuffer(buff1) must_== Continue
+      buff1.remaining() must_== 0
 
       val buff2 = encoder.mkPriorityFrame(1, 1, false, 10)
-      dec(1, 1, false, 10).decodeBuffer(buff2) must_== Success
+      dec(1, 1, false, 10).decodeBuffer(buff2) must_== Continue
+      buff2.remaining() must_== 0
     }
 
     "fail on bad priority" in {
@@ -165,4 +169,49 @@ class Http20FrameCodecSpec extends Specification {
     }
   }
 
+  "RST_STREAM frame" should {
+    def dec(sId: Int, c: Int) =
+      decoder(new MockFrameHandler(false) {
+
+        override def onRstStreamFrame(streamId: Int, code: Int): DecoderResult = {
+          sId must_== streamId
+          c must_== code
+          Continue
+        }
+      })
+
+    "make round trip" in {
+      val buff1 = encoder.mkRstStreamFrame(1, 0)
+      dec(1, 0).decodeBuffer(buff1) must_== Continue
+      buff1.remaining() must_== 0
+    }
+
+    "fail on bad stream Id" in {
+      encoder.mkRstStreamFrame(0, 1) must throwA[Exception]
+    }
+  }
+
+  "SETTINGS frame" should {
+    def dec(a: Boolean, s: Seq[Setting]) =
+      decoder(new MockFrameHandler(false) {
+        override def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): DecoderResult = {
+          s must_== settings
+          a must_== ack
+          Continue
+        }
+      })
+
+    "make a round trip" in {
+      val settings = (0 until 100).map(i => Setting(i, i + 3))
+
+      val buff1 = encoder.mkSettingsFrame(false, settings)
+      dec(false, settings).decodeBuffer(buff1) must_== Continue
+      buff1.remaining() must_== 0
+    }
+
+    "reject settings on ACK" in {
+      val settings = (0 until 100).map(i => Setting(i, i + 3))
+      encoder.mkSettingsFrame(true, settings) must throwA[Exception]
+    }
+  }
 }

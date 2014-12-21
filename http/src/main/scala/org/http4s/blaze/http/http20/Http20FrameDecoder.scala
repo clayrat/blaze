@@ -2,6 +2,8 @@ package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
 
+import scala.collection.mutable.ListBuffer
+
 
 /* The job of the Http20FrameCodec is to slice the ByteBuffers. It does
    not attempt to decode headers or perform any size limiting operations */
@@ -44,6 +46,7 @@ trait Http20FrameDecoder {
       case FrameTypes.HEADERS       => decodeHeaderFrame(buffer, streamId, flags)
       case FrameTypes.PRIORITY      => decodePriorityFrame(buffer, streamId, flags)
       case FrameTypes.RST_STREAM    => decodeRstStreamFrame(buffer, streamId)
+      case FrameTypes.SETTINGS      => decodeSettingsFrame(buffer, streamId, flags)
       case FrameTypes.PUSH_PROMISE  => decodePushPromiseFrame(buffer, streamId, flags)
       case FrameTypes.PING          => decodePingFrame(buffer, streamId, flags)
       case FrameTypes.GOAWAY        => decodeGoAwayFrame(buffer, streamId)
@@ -139,22 +142,30 @@ trait Http20FrameDecoder {
     val len = buffer.remaining()
     val settingsCount = len / 6 // 6 bytes per setting
 
-    if (len - settingsCount != 0) { // Invalid frame size
-      return Error(PROTOCOL_ERROR("Detected corrupted SETTINGS frame size"))
+    val isAck = Flags.ACK(flags)
+
+    if (len % 6 != 0) { // Invalid frame size
+      return Error(FRAME_SIZE_ERROR("SETTINGS frame payload must be multiple of 6 bytes", 6, len))
     }
 
-    def go(remaining: Int): DecoderResult = {
-      if (remaining > 0) {
-        val id: Int = buffer.getShort() & 0xffff
-        val value: Long = buffer.getInt() & 0xffffffffl
-        val r = handler.handleSetting(id, value)
-        if (r == Success) go(remaining - 1)
-        else r
-      }
-      else Success
+    if (isAck && settingsCount != 0) {
+      return Error(FRAME_SIZE_ERROR("SETTINGS ACK frame with settings payload", 0, len))
     }
 
+    if (streamId != 0x0) {
+      return Error(PROTOCOL_ERROR(s"SETTINGS frame with invalid stream id: $streamId"))
+    }
+
+    val settings = new ListBuffer[Setting]
+    def go(remaining: Int): Unit = if (remaining > 0) {
+      val id: Int = buffer.getShort() & 0xffff
+      val value: Long = buffer.getInt() & 0xffffffffl
+      settings += Setting(id, value)
+      go(remaining - 1)
+    }
     go(settingsCount)
+
+    handler.onSettingsFrame(isAck, settings.result)
   }
 
   //////////// PUSH_PROMISE ///////////////

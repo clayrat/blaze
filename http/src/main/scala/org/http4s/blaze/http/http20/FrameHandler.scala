@@ -20,8 +20,7 @@ trait FrameHandler {
 
   def onRstStreamFrame(streamId: Int, code: Int): DecoderResult
 
-  // Each setting is handled one at a time. false signals the decoding process to halt
-  def handleSetting(id: Int, value: Long): DecoderResult
+  def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): DecoderResult
 
   def onPushPromiseFrame(streamId: Int, promisedId: Int, end_headers: Boolean, data: ByteBuffer): DecoderResult
 
