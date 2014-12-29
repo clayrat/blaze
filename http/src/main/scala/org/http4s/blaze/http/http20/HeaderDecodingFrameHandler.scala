@@ -4,8 +4,7 @@ import java.nio.ByteBuffer
 
 import org.http4s.blaze.util.BufferTools
 
-/** This class is not 'thread safe' and should be used in a
-  * synchronized block or within a single thread */
+/** This class is not 'thread safe' and should be treated accordingly */
 abstract class HeaderDecodingFrameHandler extends FrameHandler {
 
   type HeaderType
@@ -19,15 +18,13 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
 
   ///////////////////////////////////////////////////////////////////////////
   
-  def setMaxHeaderTableSize(maxSize: Int): Unit = { headerDecoder.setMaxTableSize(maxSize) }
-
   def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_stream: Boolean): DecoderResult
 
   def onCompletePushPromiseFrame(headers: HeaderType, streamId: Int, promisedId: Int): DecoderResult
 
-
-
   ////////////////////////////////////////////////////////////////////////////
+
+  final def setMaxHeaderTableSize(maxSize: Int): Unit = { headerDecoder.setMaxTableSize(maxSize) }
 
   override def inHeaderSequence(): Boolean = !headerDecoder.empty()
 

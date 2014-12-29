@@ -51,6 +51,7 @@ trait Http20FrameDecoder {
       case FrameTypes.PING          => decodePingFrame(buffer, streamId, flags)
       case FrameTypes.GOAWAY        => decodeGoAwayFrame(buffer, streamId)
       case FrameTypes.WINDOW_UPDATE => decodeWindowUpdateFrame(buffer, streamId)
+      case FrameTypes.CONTINUATION  => decodeContinuationFrame(buffer, streamId, flags)
         
         // this concludes the types established by HTTP/2.0, but it could be an extension
       case code                     => onExtensionFrame(code, streamId, flags, buffer.slice())
@@ -62,6 +63,9 @@ trait Http20FrameDecoder {
 
     return r
   }
+
+  /** true if the decoder is decoding CONTINUATION frames */
+  final def inHeaderSequence(): Boolean = handler.inHeaderSequence()
   
   /** Overriding this method allows for easily supporting extension frames */
   def onExtensionFrame(code: Int, streamId: Int, flags: Byte, buffer: ByteBuffer): DecoderResult =

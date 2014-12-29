@@ -2,8 +2,11 @@ package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
 
-trait HeaderHttp20Encoder[Headers] { self: Http20FrameEncoder =>
+trait HeaderHttp20Encoder { self: Http20FrameEncoder =>
+  /** The type of the Headers that will be encoded */
+  type Headers
 
+  // The encoder used to compress the headers
   protected val headerEncoder: HeaderEncoder[Headers]
 
   final def setEncoderMaxTable(max: Int): Unit = { headerEncoder.setMaxTableSize(max) }

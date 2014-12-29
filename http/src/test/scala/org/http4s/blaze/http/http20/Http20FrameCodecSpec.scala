@@ -2,10 +2,12 @@ package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
 
+import org.http4s.blaze.util.BufferTools
 import org.http4s.blaze.util.BufferTools._
 
 import org.specs2.mutable.Specification
 
+import scala.collection.mutable.ListBuffer
 
 
 class Http20FrameCodecSpec extends Specification {
@@ -212,6 +214,53 @@ class Http20FrameCodecSpec extends Specification {
     "reject settings on ACK" in {
       val settings = (0 until 100).map(i => Setting(i, i + 3))
       encoder.mkSettingsFrame(true, settings) must throwA[Exception]
+    }
+  }
+
+  def hencoder = new HeaderHttp20Encoder with Http20FrameEncoder {
+    override type Headers = Seq[(String,String)]
+    override protected val headerEncoder: HeaderEncoder[Headers] = new SeqTupleHeaderEncoder(4096)
+  }
+
+  "HEADERS frame with compressors" should {
+    def dec(sId: Int, sDep: Int, ex: Boolean, p: Int, es: Boolean, hs: Seq[(String, String)]) =
+      decoder(new MockHeaderDecodingFrameHandler {
+        override def onCompleteHeadersFrame(headers: Seq[(String,String)],
+                                            streamId: Int,
+                                            streamDep: Int,
+                                            exclusive: Boolean,
+                                            priority: Int,
+                                            end_stream: Boolean): DecoderResult = {
+          sId must_== streamId
+          sDep must_== streamDep
+          ex must_== exclusive
+          p must_== priority
+          es must_== end_stream
+          hs must_== headers
+          Halt
+        }
+      })
+
+    "Make a simple round trip" in {
+      val hs = Seq("foo" -> "bar", "biz" -> "baz")
+      val bs = hencoder.mkHeaderFrame(hs, 1, 0, false, -1, true, true, 0)
+
+      dec(1, 0, false, 16, true, hs).decodeBuffer(BufferTools.joinBuffers(bs)) must_== Halt
+    }
+
+    "Make a round trip with a continuation frame" in {
+      val hs = Seq("foo" -> "bar", "biz" -> "baz")
+      val bs = hencoder.mkHeaderFrame(hs, 1, 0, false, -1, false, true, 0)
+
+      val decoder = dec(1, 0, false, 16, true, hs)
+
+      decoder.inHeaderSequence() must_== false
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      decoder.inHeaderSequence() must_== true
+
+      val bs2 = hencoder.mkContinuationFrame(1, true, Nil)
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must_== Halt
     }
   }
 }
