@@ -32,12 +32,12 @@ package object http20 {
   case class Setting(key: SettingKey, value: SettingValue)
 
   object SettingsKeys {
-    val SETTINGS_HEADER_TABLE_SIZE =      0x1.toShort
-    val SETTINGS_ENABLE_PUSH =            0x2.toShort
-    val SETTINGS_MAX_CONCURRENT_STREAMS = 0x3.toShort
-    val SETTINGS_INITIAL_WINDOW_SIZE =    0x4.toShort
-    val SETTINGS_MAX_FRAME_SIZE =         0x5.toShort
-    val SETTINGS_MAX_HEADER_LIST_SIZE =   0x6.toShort
+    val SETTINGS_HEADER_TABLE_SIZE =      0x1
+    val SETTINGS_ENABLE_PUSH =            0x2
+    val SETTINGS_MAX_CONCURRENT_STREAMS = 0x3
+    val SETTINGS_INITIAL_WINDOW_SIZE =    0x4
+    val SETTINGS_MAX_FRAME_SIZE =         0x5
+    val SETTINGS_MAX_HEADER_LIST_SIZE =   0x6
   }
 
   //////////////////////////////////////////////////
