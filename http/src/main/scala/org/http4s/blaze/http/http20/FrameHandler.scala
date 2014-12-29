@@ -6,7 +6,7 @@ trait FrameHandler {
 
   def inHeaderSequence(): Boolean
 
-  def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer): DecoderResult
+  def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): DecoderResult
 
   def onHeadersFrame(streamId: Int,
                     streamDep: Int,

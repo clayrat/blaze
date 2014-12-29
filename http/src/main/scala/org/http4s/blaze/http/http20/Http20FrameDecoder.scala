@@ -80,9 +80,11 @@ trait Http20FrameDecoder {
       return Error(PROTOCOL_ERROR("Data frame with streamID 0x0"))
     }
 
+    val payload = buffer.remaining()
+
     if (Flags.PADDED(flags)) limitPadding(buffer)
 
-    handler.onDataFrame(streamId, Flags.END_STREAM(flags), buffer.slice())
+    handler.onDataFrame(streamId, Flags.END_STREAM(flags), buffer.slice(), payload)
   }
 
   //////////// HEADERS ///////////////
@@ -248,9 +250,9 @@ trait Http20FrameDecoder {
 
 
   @inline
-  private def limitPadding(buffer: ByteBuffer): ByteBuffer = {
+  private def limitPadding(buffer: ByteBuffer): Int = {
     val padding = buffer.get() & 0xff
     if (padding > 0) buffer.limit(buffer.limit() - padding)
-    buffer
+    padding
   }
 }

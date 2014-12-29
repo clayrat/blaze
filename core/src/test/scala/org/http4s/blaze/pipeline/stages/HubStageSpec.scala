@@ -23,9 +23,18 @@ class HubStageSpec extends Specification {
   val msgs = Msg(1, "one")::Msg(2, "two")::Nil
 
   // Just overwrite the abstract methods if we need them and assigns the EC to be a one that uses the current thread
-  abstract class TestHub[I, O, K](f: () => LeafBuilder[O]) extends HubStage[I, O, K](f, ec) {
-    override protected def onNodeWrite(node: Node, data: Seq[O]): Future[Unit] = ???
-    override protected def onNodeRead(node: Node, size: Int): Future[O] = ???
+  abstract class TestHub[I, O, K](f: () => LeafBuilder[O]) extends HubStage[I](ec) {
+
+    override type Attachment = Null
+    override type Out = O
+    override type Key = K
+
+    def makeNode(i: Key): Node = super.makeNode(i, null)
+
+    override protected def nodeBuilder(): LeafBuilder[Out] = f()
+
+    override protected def onNodeWrite(node: Node, data: Seq[Out]): Future[Unit] = ???
+    override protected def onNodeRead(node: Node, size: Int): Future[Out] = ???
     override protected def onNodeCommand(node: Node, cmd: OutboundCommand): Unit = ???
   }
 
