@@ -2,7 +2,9 @@ package org.http4s.blaze.pipeline
 package stages
 package addons
 
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
+import scala.concurrent.duration.Duration
 import scala.concurrent.{Promise, Future}
 
 import scala.collection.mutable.Queue
@@ -10,58 +12,29 @@ import scala.collection.mutable.Queue
 import org.http4s.blaze.util.Execution._
 import scala.util.{Failure, Success}
 
-trait Serializer[I, O] extends MidStage[I, O] {
+/** Combined [[WriteSerializer]] and [[ReadSerializer]] */
+trait Serializer[I] extends WriteSerializer[I] with ReadSerializer[I]
 
-  // These can be overridden to set the queue overflow size
-  val maxReadQueue: Int = 0
-  val maxWriteQueue: Int = 0
+/** Serializes write requests, storing intermediates in a queue */
+trait WriteSerializer[I] extends TailStage[I] { self =>
+
+  def maxWriteQueue: Int = 0
 
   ////////////////////////////////////////////////////////////////////////
 
   private val _writeLock = new AnyRef
-  private var _serializerWriteQueue: Queue[O] = new Queue
+  private var _serializerWriteQueue: Queue[I] = new Queue
   private var _serializerWritePromise: Promise[Unit] = null
 
-  private val _serializerReadRef = new AtomicReference[Future[O]](null)
-  private val _serializerWaitingReads  = if (maxReadQueue > 0) new AtomicInteger(0) else null
-
-  ///  channel reading bits //////////////////////////////////////////////
-
-  abstract override def readRequest(size: Int): Future[O] = {
-    if (maxReadQueue > 0 && _serializerWaitingReads.incrementAndGet() > maxReadQueue) {
-      _serializerWaitingReads.decrementAndGet()
-      Future.failed(new Exception(s"$name Stage max read queue exceeded: $maxReadQueue"))
-    }
-    else  {
-      val p = Promise[O]
-      val pending = _serializerReadRef.getAndSet(p.future)
-
-      if (pending == null) _serializerDoRead(p, size)  // no queue, just do a read
-      else pending.onComplete( _ => _serializerDoRead(p, size))(directec) // there is a queue, need to serialize behind it
-
-      p.future
-    }
-  }
-
-  private def _serializerDoRead(p: Promise[O], size: Int): Unit = {
-    super.readRequest(size).onComplete { t =>
-      if (maxReadQueue > 0) _serializerWaitingReads.decrementAndGet()
-
-      _serializerReadRef.compareAndSet(p.future, null)  // don't hold our reference if the queue is idle
-      p.complete(t)
-    }(directec)
-  }
-
   ///  channel writing bits //////////////////////////////////////////////
-
-  abstract override def writeRequest(data: O): Future[Unit] = _writeLock.synchronized {
+  override def channelWrite(data: I): Future[Unit] = _writeLock.synchronized {
     if (maxWriteQueue > 0 && _serializerWriteQueue.length > maxWriteQueue) {
-      Future.failed(new Exception(s"$name Stage max write queue exceeded: $maxReadQueue"))
+      Future.failed(new Exception(s"$name Stage max write queue exceeded: $maxWriteQueue"))
     }
     else {
       if (_serializerWritePromise == null) {   // there is no queue!
         _serializerWritePromise = Promise[Unit]
-        val f = super.writeRequest(data)
+        val f = super.channelWrite(data)
 
         f.onComplete {
           case Success(_) => _checkQueue()
@@ -77,14 +50,14 @@ trait Serializer[I, O] extends MidStage[I, O] {
     }
   }
 
-  abstract override def writeRequest(data: Seq[O]): Future[Unit] = _writeLock.synchronized {
+  override def channelWrite(data: Seq[I]): Future[Unit] = _writeLock.synchronized {
     if (maxWriteQueue > 0 && _serializerWriteQueue.length > maxWriteQueue) {
-      Future.failed(new Exception(s"$name Stage max write queue exceeded: $maxReadQueue"))
+      Future.failed(new Exception(s"$name Stage max write queue exceeded: $maxWriteQueue"))
     }
     else {
       if (_serializerWritePromise == null) {   // there is no queue!
         _serializerWritePromise = Promise[Unit]
-        val f = super.writeRequest(data)
+        val f = super.channelWrite(data)
         f.onComplete( _ => _checkQueue())(directec)
         f
       }
@@ -99,14 +72,14 @@ trait Serializer[I, O] extends MidStage[I, O] {
   private def _checkQueue(): Unit = _writeLock.synchronized {
     if (_serializerWriteQueue.isEmpty) _serializerWritePromise = null  // Nobody has written anything
     else {      // stuff to write
-      val f = {
-        if (_serializerWriteQueue.length > 1) {
-          val a = _serializerWriteQueue
-          _serializerWriteQueue = new Queue[O]
+    val f = {
+      if (_serializerWriteQueue.length > 1) {
+        val a = _serializerWriteQueue
+        _serializerWriteQueue = new Queue[I]
 
-          super.writeRequest(a)
-        } else super.writeRequest(_serializerWriteQueue.dequeue)
-      }
+        super.channelWrite(a)
+      } else super.channelWrite(_serializerWriteQueue.dequeue)
+    }
 
       val p = _serializerWritePromise
       _serializerWritePromise = Promise[Unit]
@@ -119,3 +92,48 @@ trait Serializer[I, O] extends MidStage[I, O] {
   }
 }
 
+/** Serializes read requests */
+trait ReadSerializer[I] extends TailStage[I] {
+  def maxReadQueue: Int = 0
+
+  private val _serializerReadRef = new AtomicReference[Future[I]](null)
+  private val _serializerWaitingReads  = if (maxReadQueue > 0) new AtomicInteger(0) else null
+
+  ///  channel reading bits //////////////////////////////////////////////
+
+  override def channelRead(size: Int = -1, timeout: Duration = Duration.Inf): Future[I] = {
+    if (maxReadQueue > 0 && _serializerWaitingReads.incrementAndGet() > maxReadQueue) {
+      _serializerWaitingReads.decrementAndGet()
+      Future.failed(new Exception(s"$name Stage max read queue exceeded: $maxReadQueue"))
+    }
+    else  {
+      val p = Promise[I]
+      val pending = _serializerReadRef.getAndSet(p.future)
+
+      if (pending == null) _serializerDoRead(p, size, timeout)  // no queue, just do a read
+      else {
+        val started = if (timeout.isFinite()) System.currentTimeMillis() else 0
+        pending.onComplete { _ =>
+          val d = if (timeout.isFinite()) {
+            val now = System.currentTimeMillis()
+            timeout - Duration(now - started, TimeUnit.MILLISECONDS)
+          } else timeout
+
+          _serializerDoRead(p, size, d)
+        }(trampoline)
+      } // there is a queue, need to serialize behind it
+
+      p.future
+    }
+  }
+
+  private def _serializerDoRead(p: Promise[I], size: Int, timeout: Duration): Unit = {
+    super.channelRead(size, timeout).onComplete { t =>
+      if (maxReadQueue > 0) _serializerWaitingReads.decrementAndGet()
+
+      _serializerReadRef.compareAndSet(p.future, null)  // don't hold our reference if the queue is idle
+      p.complete(t)
+    }(directec)
+  }
+
+}

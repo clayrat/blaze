@@ -1,14 +1,16 @@
 package org.http4s.blaze.pipeline
 
 import java.util.Date
+import java.util.concurrent.TimeoutException
 
 import scala.concurrent.{Promise, Future}
+import scala.concurrent.duration.Duration
+
+import org.log4s.getLogger
+
 import Command._
 import org.http4s.blaze.util.Execution.directec
-import scala.concurrent.duration.Duration
 import org.http4s.blaze.util.Execution
-import org.log4s.getLogger
-import java.util.concurrent.TimeoutException
 
 /*         Stages are formed from the three fundamental types. They essentially form a
  *         double linked list. Commands can be sent in both directions while data is only
@@ -66,30 +68,28 @@ sealed trait Tail[I] extends Stage {
     Future.failed(new Exception(s"This stage '${this}' isn't connected!"))
   }
 
-  final def channelWrite(data: I): Future[Unit] = channelWrite(data, Duration.Inf)
-
-  def channelWrite(data: I, timeout: Duration): Future[Unit] = {
-    logger.trace(s"Stage ${getClass.getName} sending write request with timeout $timeout")
-    try {
-      if (_prevStage != null) {
-        val f = _prevStage.writeRequest(data)
-        checkTimeout(timeout, f)
-      } else stageDisconnected
-    }
-    catch { case t: Throwable => Future.failed(t) }
+  def channelWrite(data: I): Future[Unit] = {
+    if (_prevStage != null) {
+      try _prevStage.writeRequest(data)
+      catch { case t: Throwable => Future.failed(t) }
+    } else stageDisconnected
   }
 
-  final def channelWrite(data: Seq[I]): Future[Unit] = channelWrite(data, Duration.Inf)
+  final def channelWrite(data: I, timeout: Duration): Future[Unit] = {
+    val f = channelWrite(data)
+    checkTimeout(timeout, f)
+  }
 
-  def channelWrite(data: Seq[I], timeout: Duration): Future[Unit] = {
-    logger.trace(s"Stage ${getClass.getName} sending multiple write request with timeout $timeout")
-    try {
-      if (_prevStage != null) {
-        val f = _prevStage.writeRequest(data)
-        checkTimeout(timeout, f)
-      } else stageDisconnected
-    } catch { case t: Throwable => Future.failed(t) }
+  def channelWrite(data: Seq[I]): Future[Unit] = {
+    if (_prevStage != null) {
+      try _prevStage.writeRequest(data)
+      catch { case t: Throwable => Future.failed(t) }
+    } else stageDisconnected
+  }
 
+  final def channelWrite(data: Seq[I], timeout: Duration): Future[Unit] = {
+    val f = _prevStage.writeRequest(data)
+    checkTimeout(timeout, f)
   }
 
   final def sendOutboundCommand(cmd: OutboundCommand): Unit = {
