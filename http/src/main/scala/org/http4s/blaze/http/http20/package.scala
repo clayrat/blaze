@@ -1,5 +1,9 @@
 package org.http4s.blaze.http
 
+import java.nio.ByteBuffer
+
+import java.nio.charset.StandardCharsets.US_ASCII
+
 import scala.util.control.NoStackTrace
 
 package object http20 {
@@ -40,9 +44,19 @@ package object http20 {
     val SETTINGS_MAX_HEADER_LIST_SIZE =   0x6
   }
 
+  object DefaultSettings {
+    def DEFAULT_INITIAL_MAX_FRAME_SIZE = 16384        // section 6.5.2 of the http/2.0 draft 16 spec
+    def DEFAULT_INITIAL_WINDOW_SIZE    = 65535        // section 6.9.2 of the http/2.0 draft 16 spec
+  }
+
   //////////////////////////////////////////////////
 
-  sealed abstract class Http2Exception(val code: Int, msg: String) extends Exception(msg) with NoStackTrace
+  sealed abstract class Http2Exception(val code: Int, msg: String) extends Exception(msg) with NoStackTrace {
+    def msgBuffer(): ByteBuffer = {
+      val bytes = msg.getBytes(US_ASCII)
+      ByteBuffer.wrap(bytes)
+    }
+  }
 
   case class NO_ERROR(msg: String)                                      extends Http2Exception(0x0, msg)
   case class PROTOCOL_ERROR(msg: String)                                extends Http2Exception(0x1, msg)

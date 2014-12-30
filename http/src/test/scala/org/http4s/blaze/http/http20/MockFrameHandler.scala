@@ -16,7 +16,7 @@ class MockFrameHandler(inHeaders: Boolean) extends FrameHandler {
   override def onRstStreamFrame(streamId: Int, code: Int): DecoderResult = ???
   override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): DecoderResult = ???
   override def onContinuationFrame(streamId: Int, endHeaders: Boolean, data: ByteBuffer): DecoderResult = ???
-  override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer): DecoderResult = ???
+  override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): DecoderResult = ???
   override def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): DecoderResult = ???
 }
 
@@ -41,7 +41,7 @@ class MockHeaderDecodingFrameHandler extends HeaderDecodingFrameHandler {
 
   override def onRstStreamFrame(streamId: Int, code: Int): DecoderResult = ???
 
-  override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer): DecoderResult = ???
+  override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): DecoderResult = ???
 
   override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): DecoderResult = ???
 

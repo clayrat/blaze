@@ -55,26 +55,31 @@ class Http20FrameCodecSpec extends Specification {
 
     def dat = mkData(20)
 
-    def dec(sId: Int, isL: Boolean) = decoder(new MockFrameHandler(false) {
-      override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer): DecoderResult = {
-        if (streamId == sId && isLast == isL && compare(data::Nil, dat::Nil)) Continue
-        else sys.error("Fail.")
+    def dec(sId: Int, isL: Boolean, padding: Int) = decoder(new MockFrameHandler(false) {
+      override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): DecoderResult = {
+        streamId must_== sId
+        isLast must_== isL
+        compare(data::Nil, dat::Nil) must_== true
+        padding must_== flowSize
+
+        Continue
       }
     })
 
     "make round trip" in {
       val buff1 = joinBuffers(encoder.mkDataFrame(dat, 1, true, 0))
-      dec(1, true).decodeBuffer(buff1) must_== Continue
+      dec(1, true, dat.remaining()).decodeBuffer(buff1) must_== Continue
     }
 
     "Decode 'END_STREAM flag" in {
+      // payload size is buffer + padding + 1 byte
       val buff2 = joinBuffers(encoder.mkDataFrame(dat, 3, false, 100))
-      dec(3, false).decodeBuffer(buff2) must_== Continue
+      dec(3, false, dat.remaining() + 101).decodeBuffer(buff2) must_== Continue
     }
 
     "Decode padded buffers" in {
       val buff3 = addBonus(encoder.mkDataFrame(dat, 1, true, 100))
-      dec(1, true).decodeBuffer(buff3) must_== Continue
+      dec(1, true, dat.remaining() + 101).decodeBuffer(buff3) must_== Continue
       buff3.remaining() must_== bonusSize
     }
 

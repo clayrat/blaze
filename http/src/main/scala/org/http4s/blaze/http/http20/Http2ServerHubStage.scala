@@ -1,67 +1,119 @@
 package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets.UTF_8
 import java.util
 
-import org.http4s.blaze.pipeline.Command.{EOF, OutboundCommand}
-import org.http4s.blaze.pipeline.{Command, LeafBuilder}
+import org.http4s.blaze.pipeline.Command.OutboundCommand
+import org.http4s.blaze.pipeline.stages.addons.WriteSerializer
+import org.http4s.blaze.pipeline.{Command => Cmd, LeafBuilder}
 import org.http4s.blaze.pipeline.stages.HubStage
+import org.http4s.blaze.util.Execution.trampoline
 
+import scala.annotation.tailrec
 import scala.concurrent.{Promise, ExecutionContext, Future}
 import scala.util.{Failure, Success}
 
-// The hub stage will send messages without waiting for ACKs so you must ensure the outbound
-// pipeline will not fail when receiving multiple messages
+
 abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
                                           headerEncoder: HeaderEncoder[HType],
-                                          ec: ExecutionContext,
-                                          inboundWindow: Int = 65535) extends HubStage[ByteBuffer](ec) { self =>
+                                                     ec: ExecutionContext,
+                                          inboundWindow: Int)
+  extends HubStage[ByteBuffer](ec) with WriteSerializer[ByteBuffer]
+{ hub =>
+  import DefaultSettings._
+  import SettingsKeys._
+
+  /** Alternative constructor that uses the default window size */
+  def this(headerDecoder: HeaderDecoder[HType], headerEncoder: HeaderEncoder[HType], ec: ExecutionContext) =
+      this(headerDecoder, headerEncoder, ec, DefaultSettings.DEFAULT_INITIAL_WINDOW_SIZE)
 
   type Http2Msg = NodeMsg.Http2Msg[HType]
-
-  // Using synchronization and this is the lock
-  private val lock = new AnyRef
-
-  private val INITIAL_MAX_FRAME_SIZE = 16384        // section 6.5.2 of the http/2.0 draft 16 spec
 
   override type Key = Int
   override type Out = Http2Msg
   override protected type Attachment = FlowControl.NodeState
 
+  // Using synchronization and this is the lock
+  private val lock = new AnyRef
+
   private val idManager = new StreamIdManager
   
-  private var outbound_initial_window_size = 65535  // section 6.9.2 of the http/2.0 draft 16 spec
-  private var push_enable = true                    // enabled by default
-  private var max_streams = Long.MaxValue
-  private var max_frame_size = INITIAL_MAX_FRAME_SIZE
+  private var outbound_initial_window_size = DEFAULT_INITIAL_WINDOW_SIZE
+  private var push_enable = true                    // initially enabled
+  private var max_streams = Long.MaxValue           // initially unbounded
+  private var max_frame_size = DEFAULT_INITIAL_MAX_FRAME_SIZE
+  private var max_header_size = Integer.MAX_VALUE
 
-  { // Startup
-    if (inboundWindow != 65535) { // not the default, need to set settings frame
-      ???
-    }
+  // This will throw exceptions and therefor interaction should happen in a try block
+  private val codec = new Http20FrameCodec(FHandler) with HeaderHttp20Encoder {
+    override type Headers = HType
+    override protected val headerEncoder = hub.headerEncoder
+  }
+
+  // Startup
+  override protected def stageStartup() {
+    super.stageStartup()
+
+    val f = if (inboundWindow != DEFAULT_INITIAL_WINDOW_SIZE) lock.synchronized {
+              val settings = Seq(Setting(SETTINGS_INITIAL_WINDOW_SIZE, inboundWindow))
+              val buff = codec.mkSettingsFrame(false, settings)
+              channelWrite(buff)
+            } else Future.successful(())
+
+    f.onComplete {
+      case Success(_) => readLoop()
+      case Failure(t) => onFailure(t)
+    }(trampoline)
+  }
+
+  override protected def stageShutdown(): Unit = {
+    closeAllNodes()
+    super.stageShutdown()
   }
 
   // TODO: this is probably wrong
   private def readLoop(): Unit = channelRead().onComplete {
     case Success(buff) => lock.synchronized {
-      codec.decodeBuffer(buff) match {
-        case Continue => readLoop()
-        case Halt => // NOOP
-        case Error(t) => sendOutboundCommand(Command.Error(t))
+      @tailrec
+      def go(): Unit = {
+        codec.decodeBuffer(buff) match {
+          case Continue        => go()
+          case BufferUnderflow => readLoop()
+          case Halt            => // NOOP
+          case Error(t)        =>
+            sendOutboundCommand(Cmd.Error(t))
+            stageShutdown()
+        }
       }
+
+      try go()
+      catch { case t: Throwable => onFailure(t) }
     }
 
-    case Failure(EOF) => ???
+    case Failure(t) => onFailure(t)
+  }(trampoline)
 
-    case Failure(t) => sendOutboundCommand(Command.Error(t))
+  def onFailure(t: Throwable): Unit = t match {
+    case Cmd.EOF =>
+      sendOutboundCommand(Cmd.Disconnect)
+      stageShutdown()
+
+    case PROTOCOL_ERROR(_) => ???
+
+    case t: Throwable =>
+      sendOutboundCommand(Cmd.Error(t))
+      stageShutdown()
   }
 
   override protected def nodeBuilder(): LeafBuilder[Http2Msg]
 
   /** called when a node requests a write operation */
-  override protected def onNodeWrite(node: Node, data: Seq[Http2Msg]): Future[Unit] = lock.synchronized {
+  override protected def onNodeWrite(node: Node, data: Seq[Http2Msg]): Future[Unit] = {
     // TODO: extremely bad performance
-    data.foldLeft(Future.successful(())){ (f, m) => f.flatMap(_ => node.attachment.writeMessage(m)) }
+    data.foldLeft(Future.successful(())){ (f, m) =>
+      f.flatMap(_ => lock.synchronized(node.attachment.writeMessage(m)))(trampoline)
+    }
   }
 
   /** called when a node needs more data */
@@ -70,15 +122,11 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   }
 
   /** called when a node sends an outbound command */
-  override protected def onNodeCommand(node: Node, cmd: OutboundCommand): Unit = lock.synchronized {
-    ???
-  }
-  
-  // This will throw exceptions and therefor interaction should happen in a try block
-  private val codec = new Http20FrameCodec(new FHandler) with HeaderHttp20Encoder {
-    override type Headers = HType
-    override protected val headerEncoder = self.headerEncoder
-  }
+  override protected def onNodeCommand(node: Node, cmd: OutboundCommand): Unit = lock.synchronized( cmd match {
+    case Cmd.Disconnect => removeNode(node)
+    case e@Cmd.Error(t) => logger.error(t)(s"Received error from node ${node.key}"); sendOutboundCommand(e)
+    case _ => // NOOP    Flush, Connect...
+  })
 
   // Shortcut
   private def makeNode(id: Int): Node = super.makeNode(id, FlowControl.newNode(id))
@@ -88,10 +136,10 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   
   // All the methods in here will be called from `codec` and thus synchronization can be managed through codec calls
   // By the same reasoning, errors are thrown in here and should be caught through the interaction with `codec`
-  private class FHandler extends HeaderDecodingFrameHandler {
+  private object FHandler extends HeaderDecodingFrameHandler {
     override type HeaderType = HType
 
-    override protected val headerDecoder = self.headerDecoder
+    override protected val headerDecoder = hub.headerDecoder
 
     override def onCompletePushPromiseFrame(headers: HeaderType, streamId: Int, promisedId: Int): DecoderResult = {
       throw PROTOCOL_ERROR("Server received a PUSH_PROMISE frame from a client")
@@ -112,7 +160,12 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       Continue
     }
 
-    override def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): DecoderResult = ???
+    override def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): DecoderResult = {
+      val errStr = UTF_8.decode(debugData).toString()
+      logger.warn(s"Received error code $errorCode, msg: $errStr")
+
+      ???
+    }
 
     override def onPingFrame(data: Array[Byte], ack: Boolean): DecoderResult = {
       channelWrite(codec.mkPingFrame(data, true))
@@ -120,35 +173,43 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
     }
 
     override def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): DecoderResult = {
-      import SettingsKeys._
+      if (ack) {    // TODO: check acknolegments?
+        Continue
+      } else {
+        settings.foreach {
+          case Setting(SETTINGS_HEADER_TABLE_SIZE, v)      => codec.setEncoderMaxTable(v.toInt)
 
-      var continue = true
-      settings.foreach {
-        case Setting(SETTINGS_HEADER_TABLE_SIZE, v)      => codec.setEncoderMaxTable(v.toInt)
+          case Setting(SETTINGS_ENABLE_PUSH, v)            =>
+            if      (v == 0) push_enable =  false
+            else if (v == 1) push_enable =  true
+            else throw PROTOCOL_ERROR(s"Invalid ENABLE_PUSH setting value: $v")
 
-        case Setting(SETTINGS_ENABLE_PUSH, v)            =>
-          if      (v == 0) push_enable =  false
-          else if (v == 1) push_enable =  true
-          else throw PROTOCOL_ERROR(s"Invalid ENABLE_PUSH setting value: $v")
+          case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) => max_streams = v
 
-        case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) => max_streams = v
+          case Setting(SETTINGS_INITIAL_WINDOW_SIZE, v)    =>
+            if (v > Integer.MAX_VALUE) throw PROTOCOL_ERROR(s"Invalid initial window size: $v")
+            FlowControl.onInitialWindowSizeChange(v.toInt)
 
-        case Setting(SETTINGS_INITIAL_WINDOW_SIZE, v)    =>
-          if (v > Integer.MAX_VALUE) throw PROTOCOL_ERROR(s"Invalid initial window size: $v")
-          FlowControl.onInitialWindowSizeChange(v.toInt)
+          case Setting(SETTINGS_MAX_FRAME_SIZE, v)         =>
+            if (v < DEFAULT_INITIAL_MAX_FRAME_SIZE || v > 16777215) { // max of 2^24-1 http/2.0 draft 16 spec
+              throw PROTOCOL_ERROR(s"Invalid frame size: $v")
+            }
+            max_frame_size = v.toInt
 
-        case Setting(SETTINGS_MAX_FRAME_SIZE, v)         =>
-          if (v < INITIAL_MAX_FRAME_SIZE || v > 16777215) { // max of 2^24-1 http/2.0 draft 16 spec
-            throw PROTOCOL_ERROR(s"Invalid frame size: $v")
-          }
-          max_frame_size = v.toInt
+          case Setting(SETTINGS_MAX_HEADER_LIST_SIZE, v)   =>
+            if(v > Integer.MAX_VALUE) {
+              throw PROTOCOL_ERROR(s"SETTINGS_MAX_HEADER_LIST_SIZE to large: $v")
+            }
+            max_header_size = v.toInt
 
-        case Setting(SETTINGS_MAX_HEADER_LIST_SIZE, v)   => ???
+          case Setting(k, v)   => logger.warn(s"Unknown setting ($k, $v)")
+        }
 
-        case Setting(k, v)   => logger.warn(s"Unknown setting ($k, $v)")
+        val buff = codec.mkSettingsFrame(true, Nil)
+        channelWrite(buff)    // write the ACK settings frame
+
+        Continue
       }
-
-      if (continue) Continue else Halt
     }
 
     // For handling unknown stream frames
@@ -188,7 +249,7 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
   /////////////////////////////////////////////////////////////////////////////////////////////
 
-  object FlowControl {
+  protected object FlowControl {
     private var outboundConnectionWindow = outbound_initial_window_size
     private var inboundConnectionWindow = inboundWindow
 
@@ -230,6 +291,7 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
       def hasPendingInboundData(): Boolean = !pendingInboundMessages.isEmpty
 
+      // TODO: this should be pulled out of FlowControl as its really not flow control logic
       def writeMessage(msg: Http2Msg): Future[Unit] = {
         if (pendingOutboundData != null) {
           Future.failed(new IndexOutOfBoundsException("Cannot have more than one pending write request"))
