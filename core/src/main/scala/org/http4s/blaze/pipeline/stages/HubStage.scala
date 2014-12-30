@@ -6,33 +6,31 @@ package stages
 import java.util.HashMap
 import java.nio.channels.NotYetConnectedException
 
-import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 
 import org.http4s.blaze.pipeline.Command._
 
 
 
-abstract class HubStage[I](ec: ExecutionContext) extends TailStage[I] {
+abstract class HubStage[I] extends TailStage[I] {
   
   type Out                  // type of messages accepted by the nodes
   type Key                  // type that will uniquely determine the nodes
   protected type Attachment // state that can be appended to the node
 
-  def name: String = "HubStage"
-
+  /** Will serve as the attachment point for each attached pipeline */
   sealed trait Node {
     /** Identifier of this node */
-    def key: Key
+    val key: Key
 
-    def attachment: Attachment
+    val attachment: Attachment
 
     def inboundCommand(command: InboundCommand): Unit
 
     /** Shuts down the [[Node]]
       * This [[Node]] is sent the [[Disconnected]] [[InboundCommand]],
       * any pending read requests are sent [[EOF]], and removes it from the [[HubStage]] */
-    def shutdown(): Unit
+    def stageShutdown(): Unit
   }
 
   /** called when a node requests a write operation */
@@ -41,16 +39,17 @@ abstract class HubStage[I](ec: ExecutionContext) extends TailStage[I] {
   /** called when a node needs more data */
   protected def onNodeRead(node: Node, size: Int): Future[Out]
 
-  /** called when a node sends an outbound command */
+  /** called when a node sends an outbound command
+    * This includes Disconnect commands to give the Hub notice so
+    * it can change any related state it may have */
   protected def onNodeCommand(node: Node, cmd: OutboundCommand): Unit
-  
-  protected def nodeBuilder(): LeafBuilder[Out]
 
+  /** Constructs a new LeafBuilder[Out] to make nodes from */
+  protected def nodeBuilder(): LeafBuilder[Out]
   
 
   ////////////////////////////////////////////////////////////////////////////////////
 
-  private implicit def _ec = ec
   private val nodeMap = new HashMap[Key, NodeHead]()
 
   /** Make a new node and connect it to the hub
@@ -88,10 +87,9 @@ abstract class HubStage[I](ec: ExecutionContext) extends TailStage[I] {
     val values = nodeMap.values().iterator()
     while (values.hasNext) {
       val node = values.next()
-      node.stageShutdown()
-      node.sendInboundCommand(Disconnected)
+      values.remove()
+      checkShutdown(node)
     }
-    nodeMap.clear()
   }
 
   /** Remove the specified [[Node]] from this [[HubStage]] */
@@ -104,8 +102,7 @@ abstract class HubStage[I](ec: ExecutionContext) extends TailStage[I] {
   protected def removeNode(key: Key): Option[Node] = {
     val node = nodeMap.remove(key)
     if (node != null) {
-      node.stageShutdown()
-      node.sendInboundCommand(Disconnected)
+      checkShutdown(node)
       Some(node)
     }
     else None
@@ -116,6 +113,16 @@ abstract class HubStage[I](ec: ExecutionContext) extends TailStage[I] {
     super.stageShutdown()
   }
 
+  ////////////////////////////////////////////////////////////
+
+  private def checkShutdown(node: NodeHead): Unit = {
+    if (node.isConnected()) {
+      node.stageShutdown()
+      node.sendInboundCommand(Disconnected)
+    }
+  }
+
+  ////////////////////////////////////////////////////////////
 
   private[HubStage] class NodeHead(val key: Key, val attachment: Attachment) extends HeadStage[Out] with Node {
 
@@ -123,7 +130,7 @@ abstract class HubStage[I](ec: ExecutionContext) extends TailStage[I] {
     private var connected = false
     private var initialized = false
 
-    def shutdown(): Unit = removeNode(key)
+    def isConnected(): Boolean = connected
 
     override def writeRequest(data: Out): Future[Unit] = writeRequest(data::Nil)
 
@@ -141,7 +148,8 @@ abstract class HubStage[I](ec: ExecutionContext) extends TailStage[I] {
       else if (!initialized) {
         logger.error(s"Disconnected node with key $key attempting read request")
         Future.failed(new NotYetConnectedException)
-      } else Future.failed(EOF)
+      }
+      else Future.failed(EOF)
     }
 
     override def outboundCommand(cmd: OutboundCommand): Unit =
@@ -155,6 +163,7 @@ abstract class HubStage[I](ec: ExecutionContext) extends TailStage[I] {
 
     override def stageShutdown(): Unit = {
       connected = false
+      removeNode(key)
       super.stageShutdown()
     }
   }

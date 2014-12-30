@@ -15,10 +15,10 @@ object ExampleKeystore {
     ks.load(ksStream, BogusKeystore.getKeyStorePassword)
 
 
-    val kmf = KeyManagerFactory.getInstance("SunX509")
+    val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
     kmf.init(ks, BogusKeystore.getCertificatePassword)
 
-    val context = SSLContext.getInstance("SSL")
+    val context = SSLContext.getInstance("TLSv1.2")
 
 
     context.init(kmf.getKeyManagers(), null, null)

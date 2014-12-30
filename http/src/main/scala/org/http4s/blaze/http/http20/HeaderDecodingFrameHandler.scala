@@ -73,7 +73,7 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
   final override def onContinuationFrame(streamId: Int, end_headers: Boolean, buffer: ByteBuffer): DecoderResult = {
 
     if (!inHeaderSequence() || hInfo.sId != streamId) {
-      return Error(new PROTOCOL_ERROR(s"Invalid CONTINUATION frame: $streamId"))
+      return Error(PROTOCOL_ERROR(s"Invalid CONTINUATION frame", streamId))
     }
 
     val newBuffer = BufferTools.concatBuffers(hInfo.buffer, buffer)

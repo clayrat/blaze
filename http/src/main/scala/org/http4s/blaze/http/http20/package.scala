@@ -4,11 +4,13 @@ import java.nio.ByteBuffer
 
 import java.nio.charset.StandardCharsets.US_ASCII
 
+import scala.collection.mutable
 import scala.util.control.NoStackTrace
 
 package object http20 {
   
   val HeaderSize = 9
+  def clientTLSHandshakeString = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
   private[http20] object Masks {
     val STREAMID = 0x7fffffff
@@ -45,33 +47,54 @@ package object http20 {
   }
 
   object DefaultSettings {
-    def DEFAULT_INITIAL_MAX_FRAME_SIZE = 16384        // section 6.5.2 of the http/2.0 draft 16 spec
-    def DEFAULT_INITIAL_WINDOW_SIZE    = 65535        // section 6.9.2 of the http/2.0 draft 16 spec
+
+    def HEADER_TABLE_SIZE = 4096                                  //  Section 6.5.2
+    def ENABLE_PUSH = true // 1                                   // Section 6.5.2
+    def MAX_CONCURRENT_STREAMS = Integer.MAX_VALUE // (infinite)  // Section 6.5.2
+    def INITIAL_WINDOW_SIZE = 65535                               // Section 6.5.2
+    def MAX_FRAME_SIZE = 16384                                    // Section 6.5.2
+    def MAX_HEADER_LIST_SIZE = Integer.MAX_VALUE //(infinite)     // Section 6.5.2
   }
 
   //////////////////////////////////////////////////
 
-  sealed abstract class Http2Exception(val code: Int, msg: String) extends Exception(msg) with NoStackTrace {
+  private val exceptionsMap = new mutable.HashMap[Int, ErrorGen]()
+
+  class ErrorGen private[http20](val code: Int, val name: String) {
+    exceptionsMap += ((code, this))
+
+    def apply(): Http2Exception = Http2Exception(code, name)(name, None)
+    def apply(msg: String): Http2Exception = Http2Exception(code, name)(name + ": " + msg, None)
+    def apply(msg: String, stream: Int): Http2Exception = Http2Exception(code, name)(msg, Some(stream))
+
+    def unapply(ex: Http2Exception): Option[(String, Option[Int])] = {
+      if (ex.code == code) Some(( ex.msg, ex.stream))
+      else None
+    }
+  }
+
+  final case class Http2Exception(val code: Int, val name: String)(val msg: String, val stream: Option[Int])
+    extends Exception(msg) with NoStackTrace {
     def msgBuffer(): ByteBuffer = {
       val bytes = msg.getBytes(US_ASCII)
       ByteBuffer.wrap(bytes)
     }
   }
 
-  case class NO_ERROR(msg: String)                                      extends Http2Exception(0x0, msg)
-  case class PROTOCOL_ERROR(msg: String)                                extends Http2Exception(0x1, msg)
-  case class INTERNAL_ERROR(msg: String)                                extends Http2Exception(0x2, msg)
-  case class FLOW_CONTROL_ERROR(msg: String)                            extends Http2Exception(0x3, msg)
-  case class SETTINGS_TIMEOUT(msg: String)                              extends Http2Exception(0x4, msg)
-  case class STREAM_CLOSED(msg: String)                                 extends Http2Exception(0x5, msg)
-  case class FRAME_SIZE_ERROR(msg: String, expected: Int, found: Int)   extends Http2Exception(0x6, msg)
-  case class REFUSED_STREAM(id: Int)                                    extends Http2Exception(0x7, s"Stream $id refused")
-  case class CANCEL(streamId: Int)                                      extends Http2Exception(0x8, "")
-  case object COMPRESSION_ERROR                                         extends Http2Exception(0x9, "Compression error")
-  case object CONNECT_ERROR                                             extends Http2Exception(0xa, "Connect Error")
-  case object ENHANCE_YOUR_CALM                                         extends Http2Exception(0xb, "Enhance your calm")
-  case object INADEQUATE_SECURITY                                       extends Http2Exception(0xc, "Inadequate security")
-  case object HTTP_1_1_REQUIRED                                         extends Http2Exception(0xd, "HTTP/1.1 required")
+  val NO_ERROR                 = new ErrorGen(0x0, "NO_ERROR")
+  val PROTOCOL_ERROR           = new ErrorGen(0x1, "PROTOCOL_ERROR")
+  val INTERNAL_ERROR           = new ErrorGen(0x2, "INTERNAL_ERROR")
+  val FLOW_CONTROL_ERROR       = new ErrorGen(0x3, "FLOW_CONTROL_ERROR")
+  val SETTINGS_TIMEOUT         = new ErrorGen(0x4, "SETTINGS_TIMEOUT")
+  val STREAM_CLOSED            = new ErrorGen(0x5, "STREAM_CLOSED")
+  val FRAME_SIZE_ERROR         = new ErrorGen(0x6, "FRAME_SIZE_ERROR")
+  val REFUSED_STREAM           = new ErrorGen(0x7, "FRAME_SIZE_ERROR")
+  val CANCEL                   = new ErrorGen(0x8, "CANCEL")
+  val COMPRESSION_ERROR        = new ErrorGen(0x9, "COMPRESSION_ERROR")
+  val CONNECT_ERROR            = new ErrorGen(0xa, "CONNECT_ERROR")
+  val ENHANCE_YOUR_CALM        = new ErrorGen(0xb, "ENHANCE_YOUR_CALM")
+  val INADEQUATE_SECURITY      = new ErrorGen(0xc, "INADEQUATE_SECURITY")
+  val HTTP_1_1_REQUIRED        = new ErrorGen(0xd, "HTTP_1_1_REQUIRED")
 
   //////////////////////////////////////////////////
 
@@ -91,16 +114,16 @@ package object http20 {
     def END_STREAM(flags: Byte): Boolean  = checkFlag(flags, END_STREAM)   // Data, Header
 
     val PADDED = 0x8.toByte
-    def PADDED(flags: Byte): Boolean      = checkFlag(flags, PADDED)   // Data, Header
+    def PADDED(flags: Byte): Boolean      = checkFlag(flags, PADDED)       // Data, Header
 
     val END_HEADERS = 0x4.toByte
-    def END_HEADERS(flags: Byte): Boolean = checkFlag(flags, END_HEADERS)   // Header, push_promise
+    def END_HEADERS(flags: Byte): Boolean = checkFlag(flags, END_HEADERS)  // Header, push_promise
 
     val PRIORITY = 0x20.toByte
-    def PRIORITY(flags: Byte): Boolean    = checkFlag(flags, PRIORITY)  // Header
+    def PRIORITY(flags: Byte): Boolean    = checkFlag(flags, PRIORITY)     // Header
 
     val ACK = 0x1.toByte
-    def ACK(flags: Byte): Boolean         = checkFlag(flags, ACK)   // ping
+    def ACK(flags: Byte): Boolean         = checkFlag(flags, ACK)          // ping
 
     def DepID(id: Int): Int            = id & Masks.int31
     def DepExclusive(id: Int): Boolean = (Masks.exclsive & id) != 0

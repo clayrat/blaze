@@ -19,7 +19,7 @@ trait Http20FrameDecoder {
     }
 
     buffer.mark()
-    val len = buffer.get() << 16 | buffer.get() << 8 | buffer.get()
+    val len: Int = (buffer.get() & 0xff << 16) | (buffer.get() & 0xff << 8) | (buffer.get() & 0xff)
 
     if (len + 6 > buffer.remaining()) {   // We still don't have a full frame
       buffer.reset()
@@ -35,6 +35,9 @@ trait Http20FrameDecoder {
     if (handler.inHeaderSequence() && frameType != FrameTypes.CONTINUATION) {
       return Error(PROTOCOL_ERROR(s"Received frame type $frameType while in in headers sequence"))
     }
+
+    // TODO: remove this debug code. Why not a logger?
+    println(s"buffer: $buffer, len: $len, type: ${frameType}, ID: $streamId, flags: $flags")
 
     // set frame sizes in the ByteBuffer and decode
     val oldLimit = buffer.limit()
@@ -60,6 +63,8 @@ trait Http20FrameDecoder {
     // reset buffer limits
     buffer.limit(oldLimit)
     buffer.position(endOfFrame)
+
+    println(s"After buffer: $buffer")
 
     return r
   }
@@ -89,12 +94,13 @@ trait Http20FrameDecoder {
 
   //////////// HEADERS ///////////////
   private def decodeHeaderFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): DecoderResult = {
-
     if (streamId == 0) {
       return Error(PROTOCOL_ERROR("Headers frame with streamID 0x0"))
     }
 
     if (Flags.PADDED(flags)) limitPadding(buffer)
+
+    println(s"Headers buffer: $buffer")
 
     val isPriority = Flags.PRIORITY(flags)
 
@@ -113,7 +119,7 @@ trait Http20FrameDecoder {
     }
 
     if (buffer.remaining() != 5) {    // Make sure the frame has the right amount of data
-      return Error(FRAME_SIZE_ERROR("Invalid PRIORITY frame size", 5, buffer.remaining()))
+      return Error(FRAME_SIZE_ERROR("Invalid PRIORITY frame size, required 5, received" + buffer.remaining(), streamId))
     }
 
     val r = buffer.getInt()
@@ -131,7 +137,7 @@ trait Http20FrameDecoder {
   //////////// RST_STREAM ///////////////
   private def decodeRstStreamFrame(buffer: ByteBuffer, streamId: Int): DecoderResult = {
     if (buffer.remaining() != 4) {
-      return Error(FRAME_SIZE_ERROR("Invalid RST_STREAM frame size", 4, buffer.remaining()))
+      return Error(FRAME_SIZE_ERROR("Invalid RST_STREAM frame size, required 4, received " + buffer.remaining(), streamId))
     }
 
     if (streamId == 0) {
@@ -151,15 +157,15 @@ trait Http20FrameDecoder {
     val isAck = Flags.ACK(flags)
 
     if (len % 6 != 0) { // Invalid frame size
-      return Error(FRAME_SIZE_ERROR("SETTINGS frame payload must be multiple of 6 bytes", 6, len))
+      return Error(FRAME_SIZE_ERROR("SETTINGS frame payload must be multiple of 6 bytes", streamId))
     }
 
     if (isAck && settingsCount != 0) {
-      return Error(FRAME_SIZE_ERROR("SETTINGS ACK frame with settings payload", 0, len))
+      return Error(FRAME_SIZE_ERROR("SETTINGS ACK frame with settings payload", streamId))
     }
 
     if (streamId != 0x0) {
-      return Error(PROTOCOL_ERROR(s"SETTINGS frame with invalid stream id: $streamId"))
+      return Error(PROTOCOL_ERROR(s"SETTINGS frame with invalid stream id", streamId))
     }
 
     val settings = new ListBuffer[Setting]
@@ -197,7 +203,7 @@ trait Http20FrameDecoder {
     }
 
     if (buffer.remaining() != pingSize) {
-      return Error(FRAME_SIZE_ERROR("Invalid PING frame size", 4, buffer.remaining()))
+      return Error(FRAME_SIZE_ERROR("Invalid PING frame size. Expected 4, received " + buffer.remaining()))
     }
 
     val pingBytes = new Array[Byte](pingSize)
@@ -210,7 +216,7 @@ trait Http20FrameDecoder {
   private def decodeGoAwayFrame(buffer: ByteBuffer, streamId: Int): DecoderResult = {
 
     if (buffer.remaining() < 8) {
-      return Error(FRAME_SIZE_ERROR("GOAWAY frame is wrong size", 8, buffer.remaining()))
+      return Error(FRAME_SIZE_ERROR("GOAWAY frame is wrong size. Expected 8, received " + buffer.remaining()))
     }
 
     if (streamId != 0) {
@@ -218,7 +224,7 @@ trait Http20FrameDecoder {
     }
 
     val lastStream = Flags.DepID(buffer.getInt)
-    val code: Long = buffer.getInt() & 0xffffffffl
+    val code: Long = buffer.getInt() & 0xffffffffl   // java doesn't have unsigned integers
 
     handler.onGoAwayFrame(lastStream, code, buffer.slice())
   }
@@ -226,7 +232,8 @@ trait Http20FrameDecoder {
   //////////// WINDOW_UPDATE ///////////////
   private def decodeWindowUpdateFrame(buffer: ByteBuffer, streamId: Int): DecoderResult = {
     if (buffer.remaining() != 4) {
-      return Error(FRAME_SIZE_ERROR("WINDOW_UPDATE frame frame is wrong size", 8, buffer.remaining()))
+      return Error(FRAME_SIZE_ERROR("WINDOW_UPDATE frame frame is wrong size. Expected 8, received " +
+                        buffer.remaining(), streamId))
     }
 
     val size = buffer.getInt() & Masks.int31

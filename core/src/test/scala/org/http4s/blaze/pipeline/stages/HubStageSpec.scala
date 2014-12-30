@@ -14,16 +14,12 @@ import org.log4s.getLogger
 
 class HubStageSpec extends Specification {
 
-  // its important to use a 'this thread' Execution context for many of these tests to be deterministic and not
-  // require doing some waiting which sometimes fails on the build server
-  implicit val ec = Execution.trampoline
-
   case class Msg(k: Int, msg: String)
 
   val msgs = Msg(1, "one")::Msg(2, "two")::Nil
 
   // Just overwrite the abstract methods if we need them and assigns the EC to be a one that uses the current thread
-  abstract class TestHub[I, O, K](f: () => LeafBuilder[O]) extends HubStage[I](ec) {
+  abstract class TestHub[I, O, K](f: () => LeafBuilder[O]) extends HubStage[I] {
 
     override type Attachment = Null
     override type Out = O

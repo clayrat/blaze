@@ -9,11 +9,14 @@ import scala.collection.mutable.ListBuffer
 
 import com.twitter.hpack.{Decoder, HeaderListener}
 
-abstract class HeaderDecoder[To](maxHeaderSize: Int, initialTableSize: Int) { self =>
+abstract class HeaderDecoder[To](maxHeaderSize: Int = 20*1024,
+                              val maxTableSize: Int = DefaultSettings.HEADER_TABLE_SIZE) { self =>
+
+  require(maxTableSize >= DefaultSettings.HEADER_TABLE_SIZE)
 
   private var leftovers: ByteBuffer = null
 
-  private val decoder = new Decoder(maxHeaderSize, initialTableSize)
+  private val decoder = new Decoder(maxHeaderSize, maxTableSize)
   private val listener = new HeaderListener {
     override def addHeader(name: Array[Byte], value: Array[Byte], sensitive: Boolean): Unit = {
       val k = new String(name, US_ASCII)
@@ -46,8 +49,8 @@ abstract class HeaderDecoder[To](maxHeaderSize: Int, initialTableSize: Int) { se
   final def setMaxTableSize(max: Int): Unit = decoder.setMaxHeaderTableSize(max)
 }
 
-final class SeqTupleHeaderDecoder(maxHeaderSize: Int, initialTableSize: Int)
-  extends HeaderDecoder[Seq[(String, String)]](maxHeaderSize, initialTableSize) {
+final class SeqTupleHeaderDecoder(maxHeaderSize: Int)
+  extends HeaderDecoder[Seq[(String, String)]](maxHeaderSize) {
 
   private val acc = new ListBuffer[(String, String)]
 

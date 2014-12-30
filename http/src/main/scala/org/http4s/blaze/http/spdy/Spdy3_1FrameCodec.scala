@@ -43,7 +43,7 @@ class Spdy3_1FrameCodec(val maxBufferSize: Int = -1)
 
     if (in.remaining() < 8) return None
 
-    val len = in.get(5) << 16 | in.get(6) << 8 | in.get(7)
+    val len = (in.get(5) & 0xff) << 16 | (in.get(6) & 0xff) << 8 | (in.get(7) & 0xff)
     val frametype = in.getShort(2)
 
     if (in.remaining() < 8 + len) {
