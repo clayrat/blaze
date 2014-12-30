@@ -22,13 +22,18 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   // Using synchronization and this is the lock
   private val lock = new AnyRef
 
+  private val INITIAL_MAX_FRAME_SIZE = 16384        // section 6.5.2 of the http/2.0 draft 16 spec
+
   override type Key = Int
   override type Out = Http2Msg
-  override protected type Attachment = NodeState
+  override protected type Attachment = FlowControl.NodeState
 
   private val idManager = new StreamIdManager
   
   private var outbound_initial_window_size = 65535  // section 6.9.2 of the http/2.0 draft 16 spec
+  private var push_enable = true                    // enabled by default
+  private var max_streams = Long.MaxValue
+  private var max_frame_size = INITIAL_MAX_FRAME_SIZE
 
   { // Startup
     if (inboundWindow != 65535) { // not the default, need to set settings frame
@@ -55,7 +60,7 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
   /** called when a node requests a write operation */
   override protected def onNodeWrite(node: Node, data: Seq[Http2Msg]): Future[Unit] = lock.synchronized {
-    // TODO: extremely bad form
+    // TODO: extremely bad performance
     data.foldLeft(Future.successful(())){ (f, m) => f.flatMap(_ => node.attachment.writeMessage(m)) }
   }
 
@@ -76,7 +81,7 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   }
 
   // Shortcut
-  private def makeNode(id: Int): Node = super.makeNode(id, new NodeState(id, outbound_initial_window_size, inboundWindow))
+  private def makeNode(id: Int): Node = super.makeNode(id, FlowControl.newNode(id))
 
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -120,24 +125,27 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       var continue = true
       settings.foreach {
         case Setting(SETTINGS_HEADER_TABLE_SIZE, v)      => codec.setEncoderMaxTable(v.toInt)
-        case Setting(SETTINGS_ENABLE_PUSH, v)            => ???
-        case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) => ???
+
+        case Setting(SETTINGS_ENABLE_PUSH, v)            =>
+          if      (v == 0) push_enable =  false
+          else if (v == 1) push_enable =  true
+          else throw PROTOCOL_ERROR(s"Invalid ENABLE_PUSH setting value: $v")
+
+        case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) => max_streams = v
+
         case Setting(SETTINGS_INITIAL_WINDOW_SIZE, v)    =>
           if (v > Integer.MAX_VALUE) throw PROTOCOL_ERROR(s"Invalid initial window size: $v")
-          
-          val newWindow = v.toInt
-          val diff = outbound_initial_window_size - newWindow
-          outbound_initial_window_size = newWindow
+          FlowControl.onInitialWindowSizeChange(v.toInt)
 
-          outboundConnectionWindow += diff
-          nodeIterator().foreach { node =>
-            node.attachment.incrementOutboundWindow(diff)
+        case Setting(SETTINGS_MAX_FRAME_SIZE, v)         =>
+          if (v < INITIAL_MAX_FRAME_SIZE || v > 16777215) { // max of 2^24-1 http/2.0 draft 16 spec
+            throw PROTOCOL_ERROR(s"Invalid frame size: $v")
           }
+          max_frame_size = v.toInt
 
-        case Setting(SETTINGS_MAX_FRAME_SIZE, v)         => ???
         case Setting(SETTINGS_MAX_HEADER_LIST_SIZE, v)   => ???
 
-        case Setting(k, v)   => ???
+        case Setting(k, v)   => logger.warn(s"Unknown setting ($k, $v)")
       }
 
       if (continue) Continue else Halt
@@ -148,7 +156,7 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
     override def onRstStreamFrame(streamId: Int, code: Int): DecoderResult = {
       if (removeNode(streamId).isEmpty) {
-        val msg = s"Client attempted to reset non-existant stream: $streamId, code: $code"
+        val msg = s"Client attempted to reset non-existent stream: $streamId, code: $code"
         logger.warn(msg)
         throw new PROTOCOL_ERROR(msg)
       }
@@ -173,6 +181,20 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
     }
 
     override def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): DecoderResult = {
+      FlowControl.onWindowUpdateFrame(streamId, sizeIncrement)
+      Continue
+    }
+  }
+
+  /////////////////////////////////////////////////////////////////////////////////////////////
+
+  object FlowControl {
+    private var outboundConnectionWindow = outbound_initial_window_size
+    private var inboundConnectionWindow = inboundWindow
+
+    def newNode(id: Int): NodeState = new NodeState(id, outbound_initial_window_size)
+
+    def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): Unit = {
       if (streamId == 0) {
         outboundConnectionWindow += sizeIncrement
 
@@ -183,154 +205,157 @@ abstract class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         }
       }
       else getNode(streamId).foreach(_.attachment.incrementOutboundWindow(sizeIncrement))
-
-      Continue
     }
-  }
 
-  /////////////////////////////////////////////////////////////////////////////////////////////
+    def onInitialWindowSizeChange(newWindow: Int): Unit = {
+      val diff = outbound_initial_window_size - newWindow
+      outbound_initial_window_size = newWindow
 
-  private var outboundConnectionWindow = outbound_initial_window_size
-  private var inboundConnectionWindow = inboundWindow
+      outboundConnectionWindow += diff
+      nodeIterator().foreach { node =>
+        node.attachment.incrementOutboundWindow(diff)
+      }
+    }
 
-  protected class NodeState(id: Int, initialOutboundWindow: Int, initialInboundWindow: Int) {
+    class NodeState private[FlowControl](id: Int, private var outboundWindow: Int) {
 
-    private var outboundWindow: Int = initialOutboundWindow
-    private var streamInboundWindow: Int = initialInboundWindow
+      private var streamInboundWindow: Int = inboundWindow
 
-    private val pendingInboundMessages = new util.ArrayDeque[Http2Msg](16)
-    private var pendingInboundPromise: Promise[Http2Msg] = null
-    
-    private var pendingOutboundData: (Promise[Unit], NodeMsg.DataFrame) = null
-    
-    def hasPendingOutboundData(): Boolean = pendingOutboundData != null
+      private val pendingInboundMessages = new util.ArrayDeque[Http2Msg](16)
+      private var pendingInboundPromise: Promise[Http2Msg] = null
 
-    def hasPendingInboundData(): Boolean = !pendingInboundMessages.isEmpty
-    
-    def writeMessage(msg: Http2Msg): Future[Unit] = {
-      if (pendingOutboundData != null) {
-        Future.failed(new IndexOutOfBoundsException("Cannot have more than one pending write request"))
-      } else {
-        val f = msg match {
-          case frame: NodeMsg.DataFrame =>
-            val p = Promise[Unit]
-            writeDataFrame(p, frame)
+      private var pendingOutboundData: (Promise[Unit], NodeMsg.DataFrame) = null
 
-          case NodeMsg.HeadersFrame(dep, ex, end_stream, hs) =>
-            val priority = if (dep > 0) 16 else -1
-            val buffs = codec.mkHeaderFrame(hs, id, dep, ex, priority, true, end_stream, 0)
-            channelWrite(buffs)
+      def hasPendingOutboundData(): Boolean = pendingOutboundData != null
 
-          case NodeMsg.PushPromiseFrame(promisedId, end_headers, hs) =>
-            val buffs = codec.mkPushPromiseFrame(id, promisedId, end_headers, 0, hs)
-            channelWrite(buffs)
+      def hasPendingInboundData(): Boolean = !pendingInboundMessages.isEmpty
 
-          case NodeMsg.ExtensionFrame(tpe, flags, data) =>
-            ???   // TODO: what should we do here?
+      def writeMessage(msg: Http2Msg): Future[Unit] = {
+        if (pendingOutboundData != null) {
+          Future.failed(new IndexOutOfBoundsException("Cannot have more than one pending write request"))
+        } else {
+          val f = msg match {
+            case frame: NodeMsg.DataFrame =>
+              val p = Promise[Unit]
+              writeDataFrame(p, frame)
+
+            case NodeMsg.HeadersFrame(dep, ex, end_stream, hs) =>
+              val priority = if (dep > 0) 16 else -1
+              val buffs = codec.mkHeaderFrame(hs, id, dep, ex, priority, true, end_stream, 0)
+              channelWrite(buffs)
+
+            case NodeMsg.PushPromiseFrame(promisedId, end_headers, hs) =>
+              val buffs = codec.mkPushPromiseFrame(id, promisedId, end_headers, 0, hs)
+              channelWrite(buffs)
+
+            case NodeMsg.ExtensionFrame(tpe, flags, data) =>
+              ???   // TODO: what should we do here?
+          }
+
+          f
         }
-        
-        f
       }
-    }
 
-    def incrementOutboundWindow(size: Int): Unit = {
-      outboundWindow += size
-      if (outboundWindow > 0 && outboundConnectionWindow > 0 && pendingOutboundData != null) {
-        val (p, frame) = pendingOutboundData
-        pendingOutboundData = null
-        val f = writeDataFrame(p, frame)
+      def incrementOutboundWindow(size: Int): Unit = {
+        outboundWindow += size
+        if (outboundWindow > 0 && outboundConnectionWindow > 0 && pendingOutboundData != null) {
+          val (p, frame) = pendingOutboundData
+          pendingOutboundData = null
+          val f = writeDataFrame(p, frame)
 
-        // what a dirty trick to avoid moving through a Promise in `writeDataFrame`
-        if (f ne p.future) p.completeWith(f)
-      }
-    }
-
-    def onNodeRead(): Future[Http2Msg] = {
-      if (pendingInboundPromise != null) {
-        Future.failed(new IndexOutOfBoundsException("Cannot have more than one pending write request"))
-      } else {
-        val data = pendingInboundMessages.poll()
-        if (data == null) {
-          pendingInboundPromise = Promise[Http2Msg]
-          pendingInboundPromise.future
+          // what a dirty trick to avoid moving through a Promise in `writeDataFrame`
+          if (f ne p.future) p.completeWith(f)
         }
-        else  Future.successful(data)
+      }
+
+      def onNodeRead(): Future[Http2Msg] = {
+        if (pendingInboundPromise != null) {
+          Future.failed(new IndexOutOfBoundsException("Cannot have more than one pending write request"))
+        } else {
+          val data = pendingInboundMessages.poll()
+          if (data == null) {
+            pendingInboundPromise = Promise[Http2Msg]
+            pendingInboundPromise.future
+          }
+          else  Future.successful(data)
+        }
+      }
+
+      def inboundMessage(msg: Http2Msg, flowSize: Int): Unit = {
+        decrementInboundWindow(flowSize)
+
+        if (pendingInboundPromise != null) {
+          val p = pendingInboundPromise
+          pendingInboundPromise = null
+
+          p.success(msg)
+        }
+        else pendingInboundMessages.offer(msg)
+      }
+
+      private def writeDataFrame(p: Promise[Unit], frame: NodeMsg.DataFrame): Future[Unit] = {
+        val data = frame.data
+        val sz = data.remaining()
+
+        val minWindow = math.min(outboundWindow, outboundConnectionWindow)
+
+        if (minWindow <= 0) {  // Cannot write right now
+          assert(pendingOutboundData == null)
+          pendingOutboundData = (p, frame)
+          p.future
+        }
+        else if (minWindow < sz) {  // can write a partial frame
+          outboundWindow -= minWindow
+          outboundConnectionWindow -= minWindow
+
+          val l = data.limit()
+          val end = data.position() + minWindow
+
+          data.limit(end)
+          val buffs = codec.mkDataFrame(data.slice(), id, false, 0)
+          data.limit(l).position(end)
+          channelWrite(buffs)
+          pendingOutboundData = (p, frame)
+          p.future
+        }
+        else {    // we ignore the promise
+          outboundWindow -= sz
+          outboundConnectionWindow -= sz
+
+          val buffs = codec.mkDataFrame(data, id, frame.isLast, 0)
+          channelWrite(buffs)
+        }
+      }
+
+      private def decrementInboundWindow(size: Int): Unit = {
+        if (size > streamInboundWindow || size > inboundConnectionWindow) throw FLOW_CONTROL_ERROR("Inbound flow control overflow")
+        streamInboundWindow -= size
+        inboundConnectionWindow -= size
+
+        checkInboundFlowWindow()
+      }
+
+      private def checkInboundFlowWindow(): Unit = {
+        // If we drop below 50 % and there are no pending messages, top it up
+        val bf1 =
+          if (streamInboundWindow < 0.5 * inboundWindow && pendingInboundMessages.isEmpty) {
+            val buff = codec.mkWindowUpdateFrame(id, inboundWindow - streamInboundWindow)
+            streamInboundWindow = inboundWindow
+            buff::Nil
+          } else Nil
+
+        // TODO: should we check to see if all the streams are backed up?
+        val buffs =
+          if (inboundConnectionWindow < 0.5 * inboundWindow) {
+            val buff = codec.mkWindowUpdateFrame(0, inboundWindow - inboundConnectionWindow)
+            inboundConnectionWindow = inboundWindow
+            buff::bf1
+          } else bf1
+
+        if(buffs.nonEmpty) channelWrite(buffs)
       }
     }
 
-    def inboundMessage(msg: Http2Msg, flowSize: Int): Unit = {
-      decrementInboundWindow(flowSize)
-      
-      if (pendingInboundPromise != null) {
-        val p = pendingInboundPromise
-        pendingInboundPromise = null
-
-        p.success(msg)
-      }
-      else pendingInboundMessages.offer(msg)
-    }
-
-    private def writeDataFrame(p: Promise[Unit], frame: NodeMsg.DataFrame): Future[Unit] = {
-      val data = frame.data
-      val sz = data.remaining()
-
-      val minWindow = math.min(outboundWindow, outboundConnectionWindow)
-
-      if (minWindow <= 0) {  // Cannot write right now
-        assert(pendingOutboundData == null)
-        pendingOutboundData = (p, frame)
-        p.future
-      }
-      else if (minWindow < sz) {  // can write a partial frame
-        outboundWindow -= minWindow
-        outboundConnectionWindow -= minWindow
-
-        val l = data.limit()
-        val end = data.position() + minWindow
-
-        data.limit(end)
-        val buffs = codec.mkDataFrame(data.slice(), id, false, 0)
-        data.limit(l).position(end)
-        channelWrite(buffs)
-        pendingOutboundData = (p, frame)
-        p.future
-      }
-      else {    // we ignore the promise
-        outboundWindow -= sz
-        outboundConnectionWindow -= sz
-
-        val buffs = codec.mkDataFrame(data, id, frame.isLast, 0)
-        channelWrite(buffs)
-      }
-    }
-
-    private def decrementInboundWindow(size: Int): Unit = {
-      if (size > streamInboundWindow || size > inboundConnectionWindow) throw FLOW_CONTROL_ERROR("Inbound flow control overflow")
-      streamInboundWindow -= size
-      inboundConnectionWindow -= size
-
-      checkInboundFlowWindow()
-    }
-
-    private def checkInboundFlowWindow(): Unit = {
-      // If we drop below 50 % and there are no pending messages, top it up
-      val bf1 =
-        if (streamInboundWindow < 0.5 * initialInboundWindow && pendingInboundMessages.isEmpty) {
-          val buff = codec.mkWindowUpdateFrame(id, initialInboundWindow - streamInboundWindow)
-          streamInboundWindow = initialInboundWindow
-          buff::Nil
-        } else Nil
-
-      // TODO: should we check to see if all the streams are backed up?
-      val buffs =
-        if (inboundConnectionWindow < 0.5 * initialInboundWindow) {
-          val buff = codec.mkWindowUpdateFrame(0, initialInboundWindow - inboundConnectionWindow)
-          inboundConnectionWindow = initialInboundWindow
-          buff::bf1
-        } else bf1
-
-      if(buffs.nonEmpty) channelWrite(buffs)
-    }
   }
 }
 

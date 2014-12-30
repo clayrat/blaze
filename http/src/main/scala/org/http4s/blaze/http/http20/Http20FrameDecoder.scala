@@ -252,7 +252,12 @@ trait Http20FrameDecoder {
   @inline
   private def limitPadding(buffer: ByteBuffer): Int = {
     val padding = buffer.get() & 0xff
-    if (padding > 0) buffer.limit(buffer.limit() - padding)
+    if (padding > 0) {
+      if (padding >= buffer.remaining())
+        throw PROTOCOL_ERROR(s"Padding, $padding, exceeds payload length: ${buffer.remaining}")
+
+      buffer.limit(buffer.limit() - padding)
+    }
     padding
   }
 }
