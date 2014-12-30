@@ -53,7 +53,7 @@ sealed trait Stage {
 sealed trait Tail[I] extends Stage {
   private[pipeline] var _prevStage: Head[I] = null
 
-  final def channelRead(size: Int = -1, timeout: Duration = Duration.Inf): Future[I] = {
+  def channelRead(size: Int = -1, timeout: Duration = Duration.Inf): Future[I] = {
     try {
       if (_prevStage != null) {
         val f = _prevStage.readRequest(size)
@@ -68,7 +68,7 @@ sealed trait Tail[I] extends Stage {
 
   final def channelWrite(data: I): Future[Unit] = channelWrite(data, Duration.Inf)
 
-  final def channelWrite(data: I, timeout: Duration): Future[Unit] = {
+  def channelWrite(data: I, timeout: Duration): Future[Unit] = {
     logger.trace(s"Stage ${getClass.getName} sending write request with timeout $timeout")
     try {
       if (_prevStage != null) {
@@ -81,7 +81,7 @@ sealed trait Tail[I] extends Stage {
 
   final def channelWrite(data: Seq[I]): Future[Unit] = channelWrite(data, Duration.Inf)
 
-  final def channelWrite(data: Seq[I], timeout: Duration): Future[Unit] = {
+  def channelWrite(data: Seq[I], timeout: Duration): Future[Unit] = {
     logger.trace(s"Stage ${getClass.getName} sending multiple write request with timeout $timeout")
     try {
       if (_prevStage != null) {
