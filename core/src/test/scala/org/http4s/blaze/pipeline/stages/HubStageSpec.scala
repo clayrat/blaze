@@ -1,15 +1,15 @@
 package org.http4s.blaze.pipeline.stages
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import org.specs2.mutable._
 
 import org.http4s.blaze.pipeline.Command._
 import scala.concurrent.Future
 import org.http4s.blaze.pipeline._
-import org.http4s.blaze.util.Execution
-import scala.util.Failure
-import scala.util.Success
-import org.log4s.getLogger
+import org.http4s.blaze.util.Execution.trampoline
 
+import scala.util.{Success, Failure}
 
 
 class HubStageSpec extends Specification {
@@ -21,11 +21,14 @@ class HubStageSpec extends Specification {
   // Just overwrite the abstract methods if we need them and assigns the EC to be a one that uses the current thread
   abstract class TestHub[I, O, K](f: () => LeafBuilder[O]) extends HubStage[I] {
 
+
+    override def name: String = "TestHub"
+
     override type Attachment = Null
     override type Out = O
     override type Key = K
 
-    def makeNode(i: Key): Node = super.makeNode(i, null)
+    def makeNode(i: Key): Option[Node] = super.makeNode(i, null)
 
     override protected def nodeBuilder(): LeafBuilder[Out] = f()
 
@@ -47,8 +50,9 @@ class HubStageSpec extends Specification {
       }
 
       class THub extends TestHub[Msg, Any, Int](() => LeafBuilder(new Echo1)) {
+        override def name: String = "THub"
         override protected def stageStartup(): Unit = {
-          val n = makeNode(0)
+          makeNode(0).get.startNode()
           super.stageStartup()
         }
       }
@@ -64,31 +68,43 @@ class HubStageSpec extends Specification {
     }
 
     "Shutdown nodes" in {
-      var closed = 0
+
+      val closed = new AtomicInteger(0)
 
       class Echo2 extends TailStage[Any] {
         def name = "Echo2"
         override protected def stageShutdown(): Unit = {
-          closed += 1
+          closed.incrementAndGet()
+        }
+
+        override protected def stageStartup(): Unit = {
+          channelRead().onComplete {
+            case Failure(EOF) => stageShutdown()
+            case o            => sys.error("Shouldn't get here.")
+          }(trampoline)
         }
       }
 
       class THub extends TestHub[Msg, Any, Int](() => LeafBuilder(new Echo2)) {
         override protected def stageStartup(): Unit = {
-          val n1 = makeNode(1)
-          val n2 = makeNode(2)
+
+          makeNode(1).get.startNode()
+          makeNode(2).get.startNode()
+
           super.stageStartup()
         }
+
+        override protected def onNodeRead(node: Node, size: Int): Future[Out] =
+          Future.failed(EOF)
       }
 
-      val h = new SeqHead(msgs)
+      val h = new SeqHead[Msg](List())
       LeafBuilder(new THub).base(h)
 
+      closed.get() must_== 0
       h.inboundCommand(Connected)
-      closed must_== 0
 
-      h.inboundCommand(Disconnected)
-      closed must_== 2
+      closed.get() must_== 2
     }
 
     "Deal with node write requests" in {
@@ -104,7 +120,7 @@ class HubStageSpec extends Specification {
 
       class THub extends TestHub[Msg, Int, Int](() => LeafBuilder(new Chatty)) {
         override protected def stageStartup(): Unit = {
-          val n1 = makeNode(1)
+          makeNode(1).get.startNode()
           super.stageStartup()
         }
 
@@ -139,7 +155,7 @@ class HubStageSpec extends Specification {
 
       class THub extends TestHub[Msg, Int, Int](() => LeafBuilder(new Chatty)) {
         override protected def stageStartup(): Unit = {
-          val n1 = makeNode(1)
+          makeNode(1).get.startNode()
           super.stageStartup()
         }
 
@@ -173,8 +189,8 @@ class HubStageSpec extends Specification {
 
       class THub extends TestHub[Msg, Int, Int](() => LeafBuilder(new Commanding)) {
         override protected def stageStartup(): Unit = {
-          val n1 = makeNode(1)
-          val n2 = makeNode(2)
+          makeNode(1).get.startNode()
+          makeNode(2).get.startNode()
           super.stageStartup()
         }
 
@@ -195,34 +211,29 @@ class HubStageSpec extends Specification {
       id must_== 2
     }
 
-    "Shutdown nodes when they are replaced" in {
-      var closed = 0
+    "Not replace existing nodes" in {
+      var complete = 0
 
       class Commanding extends TailStage[Int] {
         def name = "Chatty"
-
-        override protected def stageShutdown(): Unit = {
-          closed += 1
-        }
       }
 
       class THub extends TestHub[Msg, Int, Int](() => LeafBuilder(new Commanding)) {
         override protected def stageStartup(): Unit = {
-          val n1 = makeNode(1)
-          val n2 = makeNode(1)
           super.stageStartup()
+          if (makeNode(1).nonEmpty) complete += 1
+          if (makeNode(1).nonEmpty) complete += 1
         }
-
       }
 
       val h = new SeqHead(msgs)
       LeafBuilder(new THub).base(h)
 
-      closed must_== 0
+      complete must_== 0
       h.inboundCommand(Connected)
-      closed must_== 1
+      complete must_== 1
     }
-
+//
 //    "Perform an echo test" in {
 //      class Echo extends TailStage[Msg] {
 //        def name: String = "EchoTest"

@@ -16,8 +16,6 @@ object Command {
 
   case object Disconnect extends OutboundCommand
 
-  case object Disconnected extends InboundCommand
-
   case object Flush extends OutboundCommand
 
   case object EOF extends Exception("EOF") with InboundCommand with NoStackTrace {

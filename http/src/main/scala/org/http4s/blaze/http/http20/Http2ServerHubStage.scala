@@ -174,6 +174,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
   // Shortcut
   private def makeNode(id: Int): Node = super.makeNode(id, FlowControl.newNode(id))
+                                             .getOrElse(sys.error(s"Attempted to make stream that already exists"))
 
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -191,12 +192,14 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
     override def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_stream: Boolean): DecoderResult = {
       val node = getNode(streamId).getOrElse {
-          if (!idManager.checkClientId(streamId)) {
-          // Invalid streamId
-            throw PROTOCOL_ERROR(s"Invalid streamId", streamId)
-          }
+        if (!idManager.checkClientId(streamId)) {
+        // Invalid streamId
+          throw PROTOCOL_ERROR(s"Invalid streamId", streamId)
+        }
 
-          makeNode(streamId)
+        val node = makeNode(streamId)
+        node.startNode()
+        node
       }
 
       val msg = NodeMsg.HeadersFrame(streamDep, exclusive, end_stream, headers)

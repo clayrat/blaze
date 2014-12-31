@@ -19,9 +19,10 @@ trait HeaderEncoder[T] {
 }
 
 /** Simple Headers type for use in blaze and testing */
-final class SeqTupleHeaderEncoder extends HeaderEncoder[Seq[(String, String)]] {
-
-  var maxTableSize: Int = DefaultSettings.HEADER_TABLE_SIZE
+final class SeqTupleHeaderEncoder(private var maxTableSize: Int = DefaultSettings.HEADER_TABLE_SIZE)
+  extends HeaderEncoder[Seq[(String, String)]]
+{
+  require(maxTableSize <= DefaultSettings.HEADER_TABLE_SIZE, "Invalid initial table size")
 
   private val encoder = new Encoder(getMaxTableSize)
   private val os = new ByteArrayOutputStream(512)

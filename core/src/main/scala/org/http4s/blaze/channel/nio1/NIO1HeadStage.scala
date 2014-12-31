@@ -28,8 +28,8 @@ private[nio1] object NIO1HeadStage {
 }
 
 private[nio1] abstract class NIO1HeadStage(ch: SelectableChannel,
-                                           loop: SelectorLoop,
-                                           key: SelectionKey) extends ChannelHead
+                                         loop: SelectorLoop,
+                                          key: SelectionKey) extends ChannelHead
 {
   import NIO1HeadStage._
 
@@ -121,7 +121,7 @@ private[nio1] abstract class NIO1HeadStage(ch: SelectableChannel,
 
   /** Shutdown the channel with an EOF for any pending OPs */
   override protected def stageShutdown(): Unit = {
-    closeWithError(EOF)
+    closeChannel()
     super.stageShutdown()
   }
 
@@ -140,9 +140,6 @@ private[nio1] abstract class NIO1HeadStage(ch: SelectableChannel,
     *         or null if this operation is not complete
     */
   def performWrite(scratch: ByteBuffer, buffers: Array[ByteBuffer]): WriteResult
-
-  /** Don't actually close until the next cycle */
-  final override protected def closeChannel(): Unit = closeWithError(EOF)
 
   // Cleanup any read or write requests with the exception
   final override def closeWithError(t: Throwable): Unit = {

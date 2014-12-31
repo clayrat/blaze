@@ -19,7 +19,9 @@ trait Http20FrameDecoder {
     }
 
     buffer.mark()
-    val len: Int = (buffer.get() & 0xff << 16) | (buffer.get() & 0xff << 8) | (buffer.get() & 0xff)
+    val len: Int = ((buffer.get() & 0xff) << 16) |
+                   ((buffer.get() & 0xff) << 8 ) |
+                    (buffer.get() & 0xff)
 
     if (len + 6 > buffer.remaining()) {   // We still don't have a full frame
       buffer.reset()
@@ -37,7 +39,7 @@ trait Http20FrameDecoder {
     }
 
     // TODO: remove this debug code. Why not a logger?
-    println(s"buffer: $buffer, len: $len, type: ${frameType}, ID: $streamId, flags: $flags")
+//    println(s"buffer: $buffer, len: $len, type: ${frameType}, ID: $streamId, flags: $flags")
 
     // set frame sizes in the ByteBuffer and decode
     val oldLimit = buffer.limit()
@@ -63,8 +65,6 @@ trait Http20FrameDecoder {
     // reset buffer limits
     buffer.limit(oldLimit)
     buffer.position(endOfFrame)
-
-    println(s"After buffer: $buffer")
 
     return r
   }
@@ -99,8 +99,6 @@ trait Http20FrameDecoder {
     }
 
     if (Flags.PADDED(flags)) limitPadding(buffer)
-
-    println(s"Headers buffer: $buffer")
 
     val isPriority = Flags.PRIORITY(flags)
 
@@ -157,7 +155,7 @@ trait Http20FrameDecoder {
     val isAck = Flags.ACK(flags)
 
     if (len % 6 != 0) { // Invalid frame size
-      return Error(FRAME_SIZE_ERROR("SETTINGS frame payload must be multiple of 6 bytes", streamId))
+      return Error(FRAME_SIZE_ERROR(s"SETTINGS frame payload must be multiple of 6 bytes, size: $len", streamId))
     }
 
     if (isAck && settingsCount != 0) {

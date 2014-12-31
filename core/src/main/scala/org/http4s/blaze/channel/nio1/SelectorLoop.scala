@@ -158,7 +158,7 @@ final class SelectorLoop(selector: Selector, bufferSize: Int)
         try {
           val head = k.attachment()
           if (head != null) {
-            head.asInstanceOf[NIO1HeadStage].sendInboundCommand(Command.Disconnected)
+            head.asInstanceOf[NIO1HeadStage].closeChannel()
           }
           k.channel().close()
           k.attach(null)

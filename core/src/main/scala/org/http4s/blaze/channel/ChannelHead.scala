@@ -10,11 +10,13 @@ import org.http4s.blaze.pipeline.HeadStage
 trait ChannelHead extends HeadStage[ByteBuffer] {
   import ChannelHead.brokePipeMessages
 
-  /** Close the channel with an error */
+  /** Close the channel with an error
+    * __NOTE:__ EOF is a valid error to close the channel
+    * with and signals normal termination */
   protected def closeWithError(t: Throwable): Unit
 
-  /** Close the channel under normal terms such as EOF */
-  protected def closeChannel(): Unit
+  /** Close the channel under normal conditions */
+  final def closeChannel(): Unit = closeWithError(EOF)
 
   override def outboundCommand(cmd: OutboundCommand): Unit = cmd match {
     case Disconnect => closeChannel()

@@ -36,9 +36,9 @@ sealed trait Stage {
 
   def name: String
 
-  protected def stageStartup(): Unit = logger.debug(s"Stage starting up at ${new Date}")
+  protected def stageStartup(): Unit = logger.debug(s"${getClass.getName} starting up at ${new Date}")
 
-  protected def stageShutdown(): Unit = logger.debug(s"Stage shutting down at ${new Date}")
+  protected def stageShutdown(): Unit = logger.debug(s"${getClass.getName} shutting down at ${new Date}")
 
   /** Handle basic startup and shutdown commands.
     * This should clearly be overridden in all cases except possibly TailStages
@@ -47,7 +47,6 @@ sealed trait Stage {
     */
   def inboundCommand(cmd: InboundCommand): Unit = cmd match {
     case Connected     => stageStartup()
-    case Disconnected  => stageShutdown()
     case _             => logger.warn(s"$name received unhandled inbound command: $cmd")
   }
 }
@@ -133,7 +132,6 @@ sealed trait Tail[I] extends Stage {
 
     this match {
       case m: MidStage[_, _] =>
-        m.sendInboundCommand(Command.Disconnected)
         m._nextStage = null
 
       case _ => // NOOP

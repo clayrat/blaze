@@ -119,11 +119,6 @@ final class ByteBufferHead(channel: AsynchronousSocketChannel,
   override protected def stageShutdown(): Unit = closeChannel()
 
   override protected def closeWithError(t: Throwable): Unit = {
-    logger.error(t)(s"$name closing with error.")
-    closeChannel()
-  }
-
-  override protected def closeChannel(): Unit = {
     logger.debug("channelClose")
     try channel.close()
     catch { case e: IOException => /* Don't care */ }

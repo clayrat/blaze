@@ -28,9 +28,10 @@ abstract class HubStage[I] extends TailStage[I] {
     def inboundCommand(command: InboundCommand): Unit
 
     /** Shuts down the [[Node]]
-      * This [[Node]] is sent the [[Disconnected]] [[InboundCommand]],
-      * any pending read requests are sent [[EOF]], and removes it from the [[HubStage]] */
+      * Any pending read requests are sent [[EOF]], and removes it from the [[HubStage]] */
     def stageShutdown(): Unit
+
+    final def startNode(): Unit = inboundCommand(Connected)
   }
 
   /** called when a node requests a write operation */
@@ -52,20 +53,19 @@ abstract class HubStage[I] extends TailStage[I] {
 
   private val nodeMap = new HashMap[Key, NodeHead]()
 
-  /** Make a new node and connect it to the hub
+  /** Make a new node and connect it to the hub if the key doesn't already exist
     * @param key key which identifies this node
-    * @return the newly created node
+    * @return the newly created node in an unstarted state. To begin the node
+    *         send a [[Connected]] command or call its `startNode()` method
     */
-  protected def makeNode(key: Key, attachment: Attachment): Node = {
-    val node = new NodeHead(key, attachment)
-    nodeBuilder().base(node)
-    val old = nodeMap.put(key, node)
-    if (old != null) {
-      logger.warn(s"New Node $old with key $key created which replaced an existing Node")
-      old.inboundCommand(Disconnected)
+  protected def makeNode(key: Key, attachment: => Attachment): Option[Node] = {
+    if (!nodeMap.containsKey(key)) {
+      val node = new NodeHead(key, attachment)
+      nodeMap.put(key, node)
+      nodeBuilder().base(node)
+      Some(node)
     }
-    node.stageStartup()
-    node
+    else None
   }
 
   /** Get a child [[Node]]
@@ -116,10 +116,7 @@ abstract class HubStage[I] extends TailStage[I] {
   ////////////////////////////////////////////////////////////
 
   private def checkShutdown(node: NodeHead): Unit = {
-    if (node.isConnected()) {
-      node.stageShutdown()
-      node.sendInboundCommand(Disconnected)
-    }
+    if (node.isConnected()) node.stageShutdown()
   }
 
   ////////////////////////////////////////////////////////////
@@ -136,20 +133,12 @@ abstract class HubStage[I] extends TailStage[I] {
 
     override def writeRequest(data: Seq[Out]): Future[Unit] = {
       if (connected) onNodeWrite(this, data)
-      else if (!initialized) {
-        logger.error(s"Disconnected node with key $key attempting write request")
-        Future.failed(new NotYetConnectedException)
-      }
-      else Future.failed(EOF)
+      else onNotReady()
     }
 
     override def readRequest(size: Int): Future[Out] =  {
       if (connected) onNodeRead(this, size)
-      else if (!initialized) {
-        logger.error(s"Disconnected node with key $key attempting read request")
-        Future.failed(new NotYetConnectedException)
-      }
-      else Future.failed(EOF)
+      else onNotReady()
     }
 
     override def outboundCommand(cmd: OutboundCommand): Unit =
@@ -158,13 +147,20 @@ abstract class HubStage[I] extends TailStage[I] {
     override def stageStartup(): Unit = {
       connected = true
       initialized = true
-      sendInboundCommand(Connected)
     }
 
     override def stageShutdown(): Unit = {
       connected = false
       removeNode(key)
       super.stageShutdown()
+    }
+
+    private def onNotReady(): Future[Nothing] = {
+      if (!initialized) {
+        logger.error(s"Disconnected node with key $key attempting write request")
+        Future.failed(new NotYetConnectedException)
+      }
+      else Future.failed(EOF)
     }
   }
 }
