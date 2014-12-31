@@ -6,7 +6,7 @@ trait FrameHandler {
 
   def inHeaderSequence(): Boolean
 
-  def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): DecoderResult
+  def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): Http2Result
 
   def onHeadersFrame(streamId: Int,
                     streamDep: Int,
@@ -14,26 +14,26 @@ trait FrameHandler {
                      priority: Int,
                   end_headers: Boolean,
                    end_stream: Boolean,
-                   buffer: ByteBuffer): DecoderResult
+                   buffer: ByteBuffer): Http2Result
 
-  def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): DecoderResult
+  def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): Http2Result
 
-  def onRstStreamFrame(streamId: Int, code: Int): DecoderResult
+  def onRstStreamFrame(streamId: Int, code: Int): Http2Result
 
-  def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): DecoderResult
+  def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): Http2Result
 
-  def onPushPromiseFrame(streamId: Int, promisedId: Int, end_headers: Boolean, data: ByteBuffer): DecoderResult
+  def onPushPromiseFrame(streamId: Int, promisedId: Int, end_headers: Boolean, data: ByteBuffer): Http2Result
 
-  def onPingFrame(data: Array[Byte], ack: Boolean): DecoderResult
+  def onPingFrame(data: Array[Byte], ack: Boolean): Http2Result
 
-  def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): DecoderResult
+  def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): Http2Result
 
-  def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): DecoderResult
+  def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): Http2Result
 
-  def onContinuationFrame(streamId: Int, endHeaders: Boolean, data: ByteBuffer): DecoderResult
+  def onContinuationFrame(streamId: Int, endHeaders: Boolean, data: ByteBuffer): Http2Result
 
   // For handling unknown stream frames
-  def onExtensionFrame(tpe: Int, streamId: Int, flags: Byte, data: ByteBuffer): DecoderResult
+  def onExtensionFrame(tpe: Int, streamId: Int, flags: Byte, data: ByteBuffer): Http2Result
 
   ///////////// Error Handling //////////////////////////////////
 }

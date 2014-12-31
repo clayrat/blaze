@@ -13,7 +13,7 @@ trait Http20FrameDecoder {
 
   /** Decode a data frame. false signals "not enough data" */
 
-  def decodeBuffer(buffer: ByteBuffer): DecoderResult = {
+  def decodeBuffer(buffer: ByteBuffer): Http2Result = {
     if (buffer.remaining() < HeaderSize) {
       return BufferUnderflow
     }
@@ -73,13 +73,13 @@ trait Http20FrameDecoder {
   final def inHeaderSequence(): Boolean = handler.inHeaderSequence()
   
   /** Overriding this method allows for easily supporting extension frames */
-  def onExtensionFrame(code: Int, streamId: Int, flags: Byte, buffer: ByteBuffer): DecoderResult =
+  def onExtensionFrame(code: Int, streamId: Int, flags: Byte, buffer: ByteBuffer): Http2Result =
     handler.onExtensionFrame(code, streamId, flags, buffer)
 
   //////////////// Decoding algorithms ///////////////////////////////////////////////////////////
 
   //////////// DATA ///////////////
-  private def decodeDataFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): DecoderResult = {
+  private def decodeDataFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
 
     if (streamId == 0) {
       return Error(PROTOCOL_ERROR("Data frame with streamID 0x0"))
@@ -87,18 +87,24 @@ trait Http20FrameDecoder {
 
     val payload = buffer.remaining()
 
-    if (Flags.PADDED(flags)) limitPadding(buffer)
+    if (Flags.PADDED(flags)) {
+      val r = limitPadding(buffer)
+      if (!r.success) return r
+    }
 
     handler.onDataFrame(streamId, Flags.END_STREAM(flags), buffer.slice(), payload)
   }
 
   //////////// HEADERS ///////////////
-  private def decodeHeaderFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): DecoderResult = {
+  private def decodeHeaderFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
     if (streamId == 0) {
       return Error(PROTOCOL_ERROR("Headers frame with streamID 0x0"))
     }
 
-    if (Flags.PADDED(flags)) limitPadding(buffer)
+    if (Flags.PADDED(flags)) {
+      val r = limitPadding(buffer)
+      if (!r.success) return r
+    }
 
     val isPriority = Flags.PRIORITY(flags)
 
@@ -110,7 +116,7 @@ trait Http20FrameDecoder {
   }
 
   //////////// PRIORITY ///////////////
-  private def decodePriorityFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): DecoderResult = {
+  private def decodePriorityFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
 
     if (streamId == 0) {
       return Error(PROTOCOL_ERROR("Priority frame with streamID 0x0"))
@@ -133,7 +139,7 @@ trait Http20FrameDecoder {
   }
 
   //////////// RST_STREAM ///////////////
-  private def decodeRstStreamFrame(buffer: ByteBuffer, streamId: Int): DecoderResult = {
+  private def decodeRstStreamFrame(buffer: ByteBuffer, streamId: Int): Http2Result = {
     if (buffer.remaining() != 4) {
       return Error(FRAME_SIZE_ERROR("Invalid RST_STREAM frame size, required 4, received " + buffer.remaining(), streamId))
     }
@@ -148,7 +154,7 @@ trait Http20FrameDecoder {
   }
 
   //////////// SETTINGS ///////////////
-  private def decodeSettingsFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): DecoderResult = {
+  private def decodeSettingsFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
     val len = buffer.remaining()
     val settingsCount = len / 6 // 6 bytes per setting
 
@@ -179,13 +185,16 @@ trait Http20FrameDecoder {
   }
 
   //////////// PUSH_PROMISE ///////////////
-  private def decodePushPromiseFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): DecoderResult = {
+  private def decodePushPromiseFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
 
     if (streamId == 0) {
       return Error(PROTOCOL_ERROR("Data frame with streamID 0x0"))
     }
 
-    if (Flags.PADDED(flags)) limitPadding(buffer)
+    if (Flags.PADDED(flags)) {
+      val r = limitPadding(buffer)
+      if (!r.success) return r
+    }
 
     val promisedId = buffer.getInt() & Masks.int31
 
@@ -193,7 +202,7 @@ trait Http20FrameDecoder {
   }
 
   //////////// PING ///////////////
-  private def decodePingFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): DecoderResult = {
+  private def decodePingFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
     val pingSize = 8
 
     if (streamId != 0) {
@@ -211,7 +220,7 @@ trait Http20FrameDecoder {
   }
 
   //////////// GOAWAY ///////////////
-  private def decodeGoAwayFrame(buffer: ByteBuffer, streamId: Int): DecoderResult = {
+  private def decodeGoAwayFrame(buffer: ByteBuffer, streamId: Int): Http2Result = {
 
     if (buffer.remaining() < 8) {
       return Error(FRAME_SIZE_ERROR("GOAWAY frame is wrong size. Expected 8, received " + buffer.remaining()))
@@ -228,7 +237,7 @@ trait Http20FrameDecoder {
   }
 
   //////////// WINDOW_UPDATE ///////////////
-  private def decodeWindowUpdateFrame(buffer: ByteBuffer, streamId: Int): DecoderResult = {
+  private def decodeWindowUpdateFrame(buffer: ByteBuffer, streamId: Int): Http2Result = {
     if (buffer.remaining() != 4) {
       return Error(FRAME_SIZE_ERROR("WINDOW_UPDATE frame frame is wrong size. Expected 8, received " +
                         buffer.remaining(), streamId))
@@ -244,25 +253,22 @@ trait Http20FrameDecoder {
   }
 
   //////////// CONTINUATION ///////////////
-  private def decodeContinuationFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): DecoderResult = {
+  private def decodeContinuationFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
 
-    if (streamId == 0) {
-      return Error(PROTOCOL_ERROR("CONTINUATION frame with stream dependency 0x0"))
-    }
-
-    handler.onContinuationFrame(streamId, Flags.END_HEADERS(flags), buffer.slice())
+    if (streamId == 0) Error(PROTOCOL_ERROR("CONTINUATION frame with stream dependency 0x0"))
+    else handler.onContinuationFrame(streamId, Flags.END_HEADERS(flags), buffer.slice())
   }
 
 
   @inline
-  private def limitPadding(buffer: ByteBuffer): Int = {
+  private def limitPadding(buffer: ByteBuffer): MaybeError = {
     val padding = buffer.get() & 0xff
     if (padding > 0) {
-      if (padding >= buffer.remaining())
-        throw PROTOCOL_ERROR(s"Padding, $padding, exceeds payload length: ${buffer.remaining}")
-
-      buffer.limit(buffer.limit() - padding)
+      if (padding >= buffer.remaining()) {
+        Error(PROTOCOL_ERROR(s"Padding, $padding, exceeds payload length: ${buffer.remaining}"))
+      }
+      else { buffer.limit(buffer.limit() - padding); Continue }
     }
-    padding
+    else Continue
   }
 }

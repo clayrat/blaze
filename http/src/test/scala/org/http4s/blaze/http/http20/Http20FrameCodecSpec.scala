@@ -56,7 +56,7 @@ class Http20FrameCodecSpec extends Specification {
     def dat = mkData(20)
 
     def dec(sId: Int, isL: Boolean, padding: Int) = decoder(new MockFrameHandler(false) {
-      override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): DecoderResult = {
+      override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): Http2Result = {
         streamId must_== sId
         isLast must_== isL
         compare(data::Nil, dat::Nil) must_== true
@@ -98,7 +98,7 @@ class Http20FrameCodecSpec extends Specification {
                                     priority: Int,
                                     end_headers: Boolean,
                                     end_stream: Boolean,
-                                    buffer: ByteBuffer): DecoderResult = {
+                                    buffer: ByteBuffer): Http2Result = {
           sId must_== streamId
           sDep must_== streamDep
           ex must_== exclusive
@@ -143,7 +143,7 @@ class Http20FrameCodecSpec extends Specification {
   "PRIORITY frame" should {
     def dec(sId: Int, sDep: Int, ex: Boolean, p: Int) =
       decoder(new MockFrameHandler(false) {
-        override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): DecoderResult = {
+        override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): Http2Result = {
           sId must_== streamId
           sDep must_== streamDep
           ex must_== exclusive
@@ -180,7 +180,7 @@ class Http20FrameCodecSpec extends Specification {
     def dec(sId: Int, c: Int) =
       decoder(new MockFrameHandler(false) {
 
-        override def onRstStreamFrame(streamId: Int, code: Int): DecoderResult = {
+        override def onRstStreamFrame(streamId: Int, code: Int): Http2Result = {
           sId must_== streamId
           c must_== code
           Continue
@@ -201,7 +201,7 @@ class Http20FrameCodecSpec extends Specification {
   "SETTINGS frame" should {
     def dec(a: Boolean, s: Seq[Setting]) =
       decoder(new MockFrameHandler(false) {
-        override def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): DecoderResult = {
+        override def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): Http2Result = {
           s must_== settings
           a must_== ack
           Continue
@@ -235,7 +235,7 @@ class Http20FrameCodecSpec extends Specification {
                                             streamDep: Int,
                                             exclusive: Boolean,
                                             priority: Int,
-                                            end_stream: Boolean): DecoderResult = {
+                                            end_stream: Boolean): Http2Result = {
           sId must_== streamId
           sDep must_== streamDep
           ex must_== exclusive

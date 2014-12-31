@@ -27,11 +27,15 @@ class Http2Handler extends TailStage[NodeMsg.Http2Msg[Seq[(String,String)]]] {
   def handleMsg(msg: Http2Msg): Unit = msg match {
       // We don't want any bodies on here...
     case NodeMsg.HeadersFrame(streamId, ex, true, hs) =>
+
+      val tail = "" //(0 to 1024*1024).mkString("\n")
+
       val body = ByteBuffer.wrap(
         hs.map{ case (k, v) => "[\"" + k + "\", \"" + v + "\"]" }
-          .mkString("Headers\n", "\n", "")
+          .mkString("Headers\n", "\n", tail)
           .getBytes("UTF-8")
       )
+                 // pseudo-header status
       val hss = Seq((":status", "200"), ("content-type", "text/plain; charset=utf8"))
 
       val hframe = NodeMsg.HeadersFrame(streamId, ex, false, hss)
@@ -42,7 +46,7 @@ class Http2Handler extends TailStage[NodeMsg.Http2Msg[Seq[(String,String)]]] {
         case Failure(t) => sendOutboundCommand(Cmd.Error(t))
       }
 
-    case _ => ???
+    case msg => sendOutboundCommand(Cmd.Error(new Exception(s"Unhandled message: $msg")))
   }
 
   private def readLoop(): Unit = {

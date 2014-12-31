@@ -11,7 +11,9 @@ import org.http4s.blaze.pipeline.stages.HubStage
 import org.http4s.blaze.util.BufferTools
 import org.http4s.blaze.util.Execution.trampoline
 
+import scala.annotation.tailrec
 import scala.concurrent.{Promise, Future}
+import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
 
@@ -39,6 +41,8 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   // Using synchronization and this is the lock
   private val lock = new AnyRef
 
+  //////////////////////// The connection state ///////////////////////////////////
+
   private val idManager = new StreamIdManager
   
   private var outbound_initial_window_size = INITIAL_WINDOW_SIZE
@@ -47,7 +51,8 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   private var max_frame_size = MAX_FRAME_SIZE
   private var max_header_size = MAX_HEADER_LIST_SIZE       // initially unbounded
 
-  // This will throw exceptions and therefor interaction should happen in a try block
+  /////////////////////////////////////////////////////////////////////////////////
+
   private val codec = new Http20FrameCodec(FHandler) with HeaderHttp20Encoder {
     override type Headers = HType
     override protected val headerEncoder = hub.headerEncoder
@@ -113,43 +118,22 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   private def readLoop(buff: ByteBuffer): Unit = {
     logger.trace(s"Received buffer: $buff")
       def go(): Unit = {
-
         val r = lock.synchronized(codec.decodeBuffer(buff))
         logger.trace("Decoded buffer. Result: " + r)
         r match {
           case Continue => go()
-          case Halt => // NOOP
-          case Error(t) =>
-            sendOutboundCommand(Cmd.Error(t))
-            stageShutdown()
-
+          case Halt => // NOOP TODO: are we ever using `Halt`?
+          case Error(t) => onFailure(t, "readLoop Error result")
           case BufferUnderflow =>
             channelRead().onComplete {
               case Success(b2) => readLoop(BufferTools.concatBuffers(buff, b2))
-              case Failure(t) =>
-                onFailure(t, "ReadLoop")
+              case Failure(t) => onFailure(t, "ReadLoop")
             }
         }
       }
 
     try go()
-    catch { case t: Throwable => onFailure(t, "readLoop") }
-  }
-
-  def onFailure(t: Throwable, location: String): Unit = {
-    logger.trace(t)("Failure: " + location)
-    t match {
-      case Cmd.EOF =>
-        sendOutboundCommand(Cmd.Disconnect)
-        stageShutdown()
-
-      case PROTOCOL_ERROR(_, _) => ???
-
-      case t: Throwable =>
-        logger.error(t)(s"Unhandled error in $location")
-        sendOutboundCommand(Cmd.Error(t))
-        stageShutdown()
-    }
+    catch { case t: Throwable => onFailure(t, "readLoop uncaught exception") }
   }
 
   /** called when a node requests a write operation */
@@ -169,7 +153,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   override protected def onNodeCommand(node: Node, cmd: OutboundCommand): Unit = lock.synchronized( cmd match {
     case Cmd.Disconnect => removeNode(node)
     case e@Cmd.Error(t) => logger.error(t)(s"Received error from node ${node.key}"); sendOutboundCommand(e)
-    case _ => // NOOP    Flush, Connect...
+    case cmd            => logger.warn(s"$name is ignoring unhandled command ($cmd) from $node.")  // Flush, Connect...
   })
 
   // Shortcut
@@ -180,34 +164,33 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   
   // All the methods in here will be called from `codec` and thus synchronization can be managed through codec calls
-  // By the same reasoning, errors are thrown in here and should be caught through the interaction with `codec`
   private object FHandler extends HeaderDecodingFrameHandler {
     override type HeaderType = HType
 
     override protected val headerDecoder = hub.headerDecoder
 
-    override def onCompletePushPromiseFrame(headers: HeaderType, streamId: Int, promisedId: Int): DecoderResult = {
-      throw PROTOCOL_ERROR("Server received a PUSH_PROMISE frame from a client", streamId)
-    }
+    override def onCompletePushPromiseFrame(headers: HeaderType, streamId: Int, promisedId: Int): Http2Result =
+      Error(PROTOCOL_ERROR("Server received a PUSH_PROMISE frame from a client", streamId))
 
-    override def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_stream: Boolean): DecoderResult = {
-      val node = getNode(streamId).getOrElse {
-        if (!idManager.checkClientId(streamId)) {
-        // Invalid streamId
-          throw PROTOCOL_ERROR(s"Invalid streamId", streamId)
-        }
+    override def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_stream: Boolean): Http2Result = {
+      val msg = NodeMsg.HeadersFrame(streamDep, exclusive, end_stream, headers)
 
-        val node = makeNode(streamId)
-        node.startNode()
-        node
+      getNode(streamId) match {
+        case None =>
+          if (!idManager.checkClientId(streamId)) Error(PROTOCOL_ERROR(s"Invalid streamId", streamId))
+          else {
+            val node = makeNode(streamId)
+            node.startNode()
+            node.attachment.inboundMessage(msg, 0)
+          }
+
+        case Some(node) => node.attachment.inboundMessage(msg, 0)
       }
 
-      val msg = NodeMsg.HeadersFrame(streamDep, exclusive, end_stream, headers)
-      node.attachment.inboundMessage(msg, 0)
-      Continue
+
     }
 
-    override def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): DecoderResult = {
+    override def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): Http2Result = {
       val errStr = UTF_8.decode(debugData).toString()
       if (errorCode == NO_ERROR.code) {
         logger.warn(s"Received NO_ERROR goaway frame, msg: $errStr")
@@ -220,92 +203,140 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       ???
     }
 
-    override def onPingFrame(data: Array[Byte], ack: Boolean): DecoderResult = {
+    override def onPingFrame(data: Array[Byte], ack: Boolean): Http2Result = {
       channelWrite(codec.mkPingFrame(data, true))
       Continue
     }
 
-    override def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): DecoderResult = {
+    override def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): Http2Result = {
       logger.trace(s"Received settings frames: $settings, ACK: $ack")
       if (ack) Continue    // TODO: check acknolegments?
       else {
-        settings.foreach {
-          case Setting(SETTINGS_HEADER_TABLE_SIZE, v)      => codec.setEncoderMaxTable(v.toInt)
+        @tailrec
+        def go(settings: Seq[Setting]): MaybeError = {
+          if (settings.isEmpty) Continue
+          else {
+            val r = settings.head match {
+              case Setting(SETTINGS_HEADER_TABLE_SIZE, v) =>
+                codec.setEncoderMaxTable(v.toInt)
+                Continue
 
-          case Setting(SETTINGS_ENABLE_PUSH, v)            =>
-            if      (v == 0) push_enable =  false
-            else if (v == 1) push_enable =  true
-            else throw PROTOCOL_ERROR(s"Invalid ENABLE_PUSH setting value: $v")
+              case Setting(SETTINGS_ENABLE_PUSH, v) =>
+                if (v == 0) {
+                  push_enable = false; Continue
+                }
+                else if (v == 1) {
+                  push_enable = true; Continue
+                }
+                else Error(PROTOCOL_ERROR(s"Invalid ENABLE_PUSH setting value: $v"))
 
-          case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) =>
-            if (v > Integer.MAX_VALUE) {
-              throw PROTOCOL_ERROR(s"To large MAX_CONCURRENT_STREAMS: $v")
+              case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) =>
+                if (v > Integer.MAX_VALUE) {
+                  Error(PROTOCOL_ERROR(s"To large MAX_CONCURRENT_STREAMS: $v"))
+                } else {
+                  max_streams = v.toInt; Continue
+                }
+
+              case Setting(SETTINGS_INITIAL_WINDOW_SIZE, v) =>
+                if (v > Integer.MAX_VALUE) Error(PROTOCOL_ERROR(s"Invalid initial window size: $v"))
+                else {
+                  FlowControl.onInitialWindowSizeChange(v.toInt); Continue
+                }
+
+              case Setting(SETTINGS_MAX_FRAME_SIZE, v) =>
+                // max of 2^24-1 http/2.0 draft 16 spec
+                if (v < MAX_FRAME_SIZE || v > 16777215) Error(PROTOCOL_ERROR(s"Invalid frame size: $v"))
+                else {
+                  max_frame_size = v.toInt; Continue
+                }
+
+
+              case Setting(SETTINGS_MAX_HEADER_LIST_SIZE, v) =>
+                if (v > Integer.MAX_VALUE) Error(PROTOCOL_ERROR(s"SETTINGS_MAX_HEADER_LIST_SIZE to large: $v"))
+                else {
+                  max_header_size = v.toInt; Continue
+                }
+
+              case Setting(k, v) =>
+                logger.warn(s"Unknown setting ($k, $v)")
+                Continue
             }
-            max_streams = v.toInt
-
-          case Setting(SETTINGS_INITIAL_WINDOW_SIZE, v)    =>
-            if (v > Integer.MAX_VALUE) throw PROTOCOL_ERROR(s"Invalid initial window size: $v")
-            FlowControl.onInitialWindowSizeChange(v.toInt)
-
-          case Setting(SETTINGS_MAX_FRAME_SIZE, v)         =>
-            if (v < MAX_FRAME_SIZE || v > 16777215) { // max of 2^24-1 http/2.0 draft 16 spec
-              throw PROTOCOL_ERROR(s"Invalid frame size: $v")
-            }
-            max_frame_size = v.toInt
-
-          case Setting(SETTINGS_MAX_HEADER_LIST_SIZE, v)   =>
-            if(v > Integer.MAX_VALUE) {
-              throw PROTOCOL_ERROR(s"SETTINGS_MAX_HEADER_LIST_SIZE to large: $v")
-            }
-            max_header_size = v.toInt
-
-          case Setting(k, v)   => logger.warn(s"Unknown setting ($k, $v)")
+            if (r.success) go(settings.tail)
+            else r
+          }
         }
 
-        val buff = codec.mkSettingsFrame(true, Nil)
-        channelWrite(buff)    // write the ACK settings frame
-
-        Continue
+        val r = go(settings)
+        if (r.success) {
+          val buff = codec.mkSettingsFrame(true, Nil)
+          channelWrite(buff) // write the ACK settings frame
+        }
+        r
       }
     }
 
     // For handling unknown stream frames
-    override def onExtensionFrame(tpe: Int, streamId: Int, flags: Byte, data: ByteBuffer): DecoderResult = {
-      throw PROTOCOL_ERROR(s"Unsupported extension frame: type: $tpe, " +
-                           s"Stream ID: $streamId, flags: $flags, data: $data", streamId)
-    }
+    override def onExtensionFrame(tpe: Int, streamId: Int, flags: Byte, data: ByteBuffer): Http2Result =
+      Error(PROTOCOL_ERROR(s"Unsupported extension frame: type: $tpe, " +
+                           s"Stream ID: $streamId, flags: $flags, data: $data", streamId))
 
-    override def onRstStreamFrame(streamId: Int, code: Int): DecoderResult = {
-      if (removeNode(streamId).isEmpty) {
-        val msg = s"Client attempted to reset non-existent stream: $streamId, code: $code"
-        logger.warn(msg)
-        throw PROTOCOL_ERROR(msg, streamId)
+    override def onRstStreamFrame(streamId: Int, code: Int): Http2Result = {
+      val node = removeNode(streamId)
+      if (node.isEmpty) {
+        logger.warn(s"Client attempted to reset non-existent stream: $streamId, code: $code")
       }
-
-      logger.info(s"Stream $streamId reset with code $code")
+      else logger.info(s"Stream $streamId reset with code $code")
       Continue
     }
 
-    override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): DecoderResult = {
+    override def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): Http2Result = {
       getNode(streamId) match {
         case Some(node) =>
           val msg = NodeMsg.DataFrame(isLast, data)
           node.attachment.inboundMessage(msg, flowSize)
           Continue
 
-        case None => Continue  //NOOP // TODO: should this be a stream error?
+        case None => Continue  // NOOP // TODO: should this be a stream error?
       }
     }
 
-    override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): DecoderResult = {
+    override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): Http2Result = {
       // TODO: should we implement some type of priority handling?
       Continue
     }
 
-    override def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): DecoderResult = {
+    override def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): Http2Result = {
       FlowControl.onWindowUpdateFrame(streamId, sizeIncrement)
       Continue
     }
+  }
+
+  ///////////////////////////// Error Handling stuff //////////////////////////////////////////
+
+  private def onFailure(t: Throwable, location: String): Unit = {
+    logger.trace(t)("Failure: " + location)
+    t match {
+      case Cmd.EOF =>
+        sendOutboundCommand(Cmd.Disconnect)
+        stageShutdown()
+
+      case e: Http2Exception =>
+        sendGoAway(e).onComplete { _ =>
+          sendOutboundCommand(Cmd.Disconnect)
+          stageShutdown()
+        }
+
+      case t: Throwable =>
+        logger.error(t)(s"Unhandled error in $location")
+        sendOutboundCommand(Cmd.Error(t))
+        stageShutdown()
+    }
+  }
+
+  private def sendGoAway(e: Http2Exception): Future[Unit] = lock.synchronized {
+    val lastStream = idManager.lastClientId()
+    val buffs = codec.mkGoAwayFrame(lastStream, e.code, e.msgBuffer())
+    channelWrite(buffs, 10.seconds)
   }
 
   /////////////////////////////////////////////////////////////////////////////////////////////
@@ -327,10 +358,13 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         }
       }
       else getNode(streamId).foreach(_.attachment.incrementOutboundWindow(sizeIncrement))
+
+      logger.debug(s"Updated window of stream $streamId by $sizeIncrement. ConnectionOutbound: $outboundConnectionWindow")
     }
 
     def onInitialWindowSizeChange(newWindow: Int): Unit = {
-      val diff = outbound_initial_window_size - newWindow
+      val diff = newWindow - outbound_initial_window_size
+      logger.trace(s"Adjusting outbound windows by $diff")
       outbound_initial_window_size = newWindow
 
       outboundConnectionWindow += diff
@@ -380,6 +414,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         }
       }
 
+      // Increments the window and checks to see if there are any pending messages to be sent
       def incrementOutboundWindow(size: Int): Unit = {
         outboundWindow += size
         if (outboundWindow > 0 && outboundConnectionWindow > 0 && pendingOutboundData != null) {
@@ -405,16 +440,17 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         }
       }
 
-      def inboundMessage(msg: Http2Msg, flowSize: Int): Unit = {
-        decrementInboundWindow(flowSize)
-
-        if (pendingInboundPromise != null) {
-          val p = pendingInboundPromise
-          pendingInboundPromise = null
-
-          p.success(msg)
+      def inboundMessage(msg: Http2Msg, flowSize: Int): Http2Result = {
+        val r = decrementInboundWindow(flowSize)
+        if (r.success) {
+          if (pendingInboundPromise != null) {
+            val p = pendingInboundPromise
+            pendingInboundPromise = null
+            p.success(msg)
+          }
+          else pendingInboundMessages.offer(msg)
         }
-        else pendingInboundMessages.offer(msg)
+        r
       }
 
       private def writeDataFrame(p: Promise[Unit], frame: NodeMsg.DataFrame): Future[Unit] = {
@@ -451,32 +487,34 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         }
       }
 
-      private def decrementInboundWindow(size: Int): Unit = {
-        if (size > streamInboundWindow || size > inboundConnectionWindow) throw FLOW_CONTROL_ERROR("Inbound flow control overflow")
-        streamInboundWindow -= size
-        inboundConnectionWindow -= size
+      // Decrements the inbound window and if not backed up, sends a window update if the level drops below 50%
+      private def decrementInboundWindow(size: Int): MaybeError = {
+        if (size > streamInboundWindow || size > inboundConnectionWindow) {
+          Error(FLOW_CONTROL_ERROR("Inbound flow control overflow"))
+        } else {
+          streamInboundWindow -= size
+          inboundConnectionWindow -= size
 
-        checkInboundFlowWindow()
-      }
+          // If we drop below 50 % and there are no pending messages, top it up
+          val bf1 =
+            if (streamInboundWindow < 0.5 * inboundWindow && pendingInboundMessages.isEmpty) {
+              val buff = codec.mkWindowUpdateFrame(id, inboundWindow - streamInboundWindow)
+              streamInboundWindow = inboundWindow
+              buff::Nil
+            } else Nil
 
-      private def checkInboundFlowWindow(): Unit = {
-        // If we drop below 50 % and there are no pending messages, top it up
-        val bf1 =
-          if (streamInboundWindow < 0.5 * inboundWindow && pendingInboundMessages.isEmpty) {
-            val buff = codec.mkWindowUpdateFrame(id, inboundWindow - streamInboundWindow)
-            streamInboundWindow = inboundWindow
-            buff::Nil
-          } else Nil
+          // TODO: should we check to see if all the streams are backed up?
+          val buffs =
+            if (inboundConnectionWindow < 0.5 * inboundWindow) {
+              val buff = codec.mkWindowUpdateFrame(0, inboundWindow - inboundConnectionWindow)
+              inboundConnectionWindow = inboundWindow
+              buff::bf1
+            } else bf1
 
-        // TODO: should we check to see if all the streams are backed up?
-        val buffs =
-          if (inboundConnectionWindow < 0.5 * inboundWindow) {
-            val buff = codec.mkWindowUpdateFrame(0, inboundWindow - inboundConnectionWindow)
-            inboundConnectionWindow = inboundWindow
-            buff::bf1
-          } else bf1
+          if(buffs.nonEmpty) channelWrite(buffs)
 
-        if(buffs.nonEmpty) channelWrite(buffs)
+          Continue
+        }
       }
     }
 

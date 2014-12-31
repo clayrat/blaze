@@ -18,9 +18,9 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
 
   ///////////////////////////////////////////////////////////////////////////
   
-  def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_stream: Boolean): DecoderResult
+  def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_stream: Boolean): Http2Result
 
-  def onCompletePushPromiseFrame(headers: HeaderType, streamId: Int, promisedId: Int): DecoderResult
+  def onCompletePushPromiseFrame(headers: HeaderType, streamId: Int, promisedId: Int): Http2Result
 
   ////////////////////////////////////////////////////////////////////////////
 
@@ -34,7 +34,7 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
                                   priority: Int,
                                   end_headers: Boolean,
                                   end_stream: Boolean,
-                                  buffer: ByteBuffer): DecoderResult = {
+                                  buffer: ByteBuffer): Http2Result = {
 
     if (inHeaderSequence()) {
       return Error(PROTOCOL_ERROR("Received HEADERS frame while in in headers sequence"))
@@ -52,7 +52,7 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
     }
   }
 
-  final override def onPushPromiseFrame(streamId: Int, promisedId: Int, end_headers: Boolean, buffer: ByteBuffer): DecoderResult = {
+  final override def onPushPromiseFrame(streamId: Int, promisedId: Int, end_headers: Boolean, buffer: ByteBuffer): Http2Result = {
 
     if (inHeaderSequence()) {
       return Error(PROTOCOL_ERROR("Received HEADERS frame while in in headers sequence"))
@@ -70,7 +70,7 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
     }
   }
 
-  final override def onContinuationFrame(streamId: Int, end_headers: Boolean, buffer: ByteBuffer): DecoderResult = {
+  final override def onContinuationFrame(streamId: Int, end_headers: Boolean, buffer: ByteBuffer): Http2Result = {
 
     if (!inHeaderSequence() || hInfo.sId != streamId) {
       return Error(PROTOCOL_ERROR(s"Invalid CONTINUATION frame", streamId))

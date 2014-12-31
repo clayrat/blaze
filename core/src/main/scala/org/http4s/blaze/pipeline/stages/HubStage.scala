@@ -32,6 +32,8 @@ abstract class HubStage[I] extends TailStage[I] {
     def stageShutdown(): Unit
 
     final def startNode(): Unit = inboundCommand(Connected)
+
+    override def toString: String = s"Node[$key]"
   }
 
   /** called when a node requests a write operation */

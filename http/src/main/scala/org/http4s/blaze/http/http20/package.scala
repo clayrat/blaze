@@ -16,7 +16,6 @@ package object http20 {
     val STREAMID = 0x7fffffff
     val LENGTH   =   0xffffff
     val int31    = 0x7fffffff
-
     val exclsive = ~int31
   }
 
@@ -33,17 +32,39 @@ package object http20 {
     val CONTINUATION  = 0x9.toByte
   }
 
-  type SettingKey = Int
+  //////////////// Settings /////////////////////////////////
+
   type SettingValue = Long
-  case class Setting(key: SettingKey, value: SettingValue)
+
+  final case class Setting(key: SettingsKeys.SettingKey, value: SettingValue)
+  object Setting {
+    def apply(key: Int, value: SettingValue): Setting = Setting(SettingsKeys(key), value)
+  }
 
   object SettingsKeys {
-    val SETTINGS_HEADER_TABLE_SIZE =      0x1
-    val SETTINGS_ENABLE_PUSH =            0x2
-    val SETTINGS_MAX_CONCURRENT_STREAMS = 0x3
-    val SETTINGS_INITIAL_WINDOW_SIZE =    0x4
-    val SETTINGS_MAX_FRAME_SIZE =         0x5
-    val SETTINGS_MAX_HEADER_LIST_SIZE =   0x6
+
+    def apply(id: Int): SettingKey =
+      settingsMap.getOrElse(id, SettingKey(id, s"UNKNOWN_SETTING(${Integer.toHexString(id)})"))
+
+    private val settingsMap = new mutable.HashMap[Int, SettingKey]()
+
+    private def mkKey(id: Int, name: String): SettingKey = {
+      val k = SettingKey(id, name)
+      settingsMap += ((id, k))
+      k
+    }
+
+    final case class SettingKey(id: Int, name: String) {
+      override def toString = name
+      def toShort: Short = id.toShort
+    }
+
+    val SETTINGS_HEADER_TABLE_SIZE      = mkKey(0x1, "SETTINGS_HEADER_TABLE_SIZE")
+    val SETTINGS_ENABLE_PUSH            = mkKey(0x2, "SETTINGS_ENABLE_PUSH")
+    val SETTINGS_MAX_CONCURRENT_STREAMS = mkKey(0x3, "SETTINGS_MAX_CONCURRENT_STREAMS")
+    val SETTINGS_INITIAL_WINDOW_SIZE    = mkKey(0x4, "SETTINGS_INITIAL_WINDOW_SIZE")
+    val SETTINGS_MAX_FRAME_SIZE         = mkKey(0x5, "SETTINGS_MAX_FRAME_SIZE")
+    val SETTINGS_MAX_HEADER_LIST_SIZE   = mkKey(0x6, "SETTINGS_MAX_HEADER_LIST_SIZE")
   }
 
   object DefaultSettings {
@@ -56,11 +77,11 @@ package object http20 {
     def MAX_HEADER_LIST_SIZE = Integer.MAX_VALUE //(infinite)     // Section 6.5.2
   }
 
-  //////////////////////////////////////////////////
+  ///////////////////// HTTP/2.0 Errors  /////////////////////////////
 
   private val exceptionsMap = new mutable.HashMap[Int, ErrorGen]()
 
-  class ErrorGen private[http20](val code: Int, val name: String) {
+  final class ErrorGen private[http20](val code: Int, val name: String) {
     exceptionsMap += ((code, this))
 
     def apply(): Http2Exception = Http2Exception(code, name)(name, None)
@@ -74,7 +95,8 @@ package object http20 {
   }
 
   final case class Http2Exception(val code: Int, val name: String)(val msg: String, val stream: Option[Int])
-    extends Exception(msg) with NoStackTrace {
+        extends Exception(msg)
+  {
     def msgBuffer(): ByteBuffer = {
       val bytes = msg.getBytes(US_ASCII)
       ByteBuffer.wrap(bytes)
@@ -98,14 +120,15 @@ package object http20 {
 
   //////////////////////////////////////////////////
 
-  sealed trait DecoderResult
+  sealed trait Http2Result
 
-  case object Continue extends DecoderResult
-  case object Halt extends DecoderResult
-  case object BufferUnderflow extends DecoderResult
+  case object Halt extends Http2Result
+  case object BufferUnderflow extends Http2Result
 
-  case class Error(err: Http2Exception) extends DecoderResult
-
+  /** Represents the possibility of failure */
+  sealed trait MaybeError extends Http2Result              { def          success: Boolean }
+  case object Continue extends MaybeError                  { override def success: Boolean = true }
+  case class Error(err: Http2Exception) extends MaybeError { override def success: Boolean = false }
 
   //////////////////////////////////////////////////
 
@@ -125,12 +148,10 @@ package object http20 {
     val ACK = 0x1.toByte
     def ACK(flags: Byte): Boolean         = checkFlag(flags, ACK)          // ping
 
-    def DepID(id: Int): Int            = id & Masks.int31
-    def DepExclusive(id: Int): Boolean = (Masks.exclsive & id) != 0
+    def DepID(id: Int): Int               = id & Masks.int31
+    def DepExclusive(id: Int): Boolean    = (Masks.exclsive & id) != 0
   }
 
   @inline
   private def checkFlag(flags: Byte, flag: Byte) = (flags & flag) != 0
-
-
 }
