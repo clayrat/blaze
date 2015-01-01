@@ -7,10 +7,10 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Promise, Future}
 
-import scala.collection.mutable.Queue
+import scala.collection.mutable.ArrayBuffer
 
 import org.http4s.blaze.util.Execution._
-import scala.util.{Failure, Success}
+import scala.util.{Try, Failure, Success}
 
 /** Combined [[WriteSerializer]] and [[ReadSerializer]] */
 trait Serializer[I] extends WriteSerializer[I] with ReadSerializer[I]
@@ -23,7 +23,7 @@ trait WriteSerializer[I] extends TailStage[I] { self =>
   ////////////////////////////////////////////////////////////////////////
 
   private val _writeLock = new AnyRef
-  private var _serializerWriteQueue: Queue[I] = new Queue
+  private var _serializerWriteQueue = new ArrayBuffer[I]
   private var _serializerWritePromise: Promise[Unit] = null
 
   ///  channel writing bits //////////////////////////////////////////////
@@ -35,16 +35,11 @@ trait WriteSerializer[I] extends TailStage[I] { self =>
       if (_serializerWritePromise == null) {   // there is no queue!
         _serializerWritePromise = Promise[Unit]
         val f = super.channelWrite(data)
-
-        f.onComplete {
-          case Success(_) => _checkQueue()
-          case f:Failure[_] => _serializerWritePromise.complete(f)
-        }(directec)
-
+        f.onComplete(_checkQueue)(directec)
         f
       }
       else {
-        _serializerWriteQueue += (data)
+        _serializerWriteQueue += data
         _serializerWritePromise.future
       }
     }
@@ -58,7 +53,7 @@ trait WriteSerializer[I] extends TailStage[I] { self =>
       if (_serializerWritePromise == null) {   // there is no queue!
         _serializerWritePromise = Promise[Unit]
         val f = super.channelWrite(data)
-        f.onComplete( _ => _checkQueue())(directec)
+        f.onComplete(_checkQueue)(directec)
         f
       }
       else {
@@ -69,27 +64,37 @@ trait WriteSerializer[I] extends TailStage[I] { self =>
   }
 
   // Needs to be in a synchronized because it is called from continuations
-  private def _checkQueue(): Unit = _writeLock.synchronized {
-    if (_serializerWriteQueue.isEmpty) _serializerWritePromise = null  // Nobody has written anything
-    else {      // stuff to write
-    val f = {
-      if (_serializerWriteQueue.length > 1) {
-        val a = _serializerWriteQueue
-        _serializerWriteQueue = new Queue[I]
-
-        super.channelWrite(a)
-      } else super.channelWrite(_serializerWriteQueue.dequeue)
-    }
-
+  private def _checkQueue(t: Try[Unit]): Unit = _writeLock.synchronized (t match {
+    case f@ Failure(_) =>
+      _serializerWriteQueue.clear()
       val p = _serializerWritePromise
-      _serializerWritePromise = Promise[Unit]
+      _serializerWritePromise = null
+      p.tryComplete(f)
 
-      f.onComplete { t =>
-        _checkQueue()
-        p.complete(t)
-      }(trampoline)
-    }
-  }
+    case Success(_)    =>
+      if (_serializerWriteQueue.isEmpty) _serializerWritePromise = null  // Nobody has written anything
+      else {      // stuff to write
+        val f = {
+          if (_serializerWriteQueue.length > 1) { // multiple messages, just give them the queue
+            val a = _serializerWriteQueue
+            _serializerWriteQueue = new ArrayBuffer[I]((a.size * 1.25).toInt)
+            super.channelWrite(a)
+          } else {          // only a single element to write, don't send the while queue
+            val h = _serializerWriteQueue.head
+            _serializerWriteQueue.clear()
+            super.channelWrite(h)
+          }
+        }
+
+        val p = _serializerWritePromise
+        _serializerWritePromise = Promise[Unit]
+
+        f.onComplete { t =>
+          _checkQueue(t)
+          p.complete(t)
+        }(trampoline)
+      }
+  })
 }
 
 /** Serializes read requests */
