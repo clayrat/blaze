@@ -5,7 +5,7 @@ import java.nio.charset.StandardCharsets.US_ASCII
 
 import org.http4s.blaze.util.BufferTools
 
-import scala.collection.mutable.ListBuffer
+import scala.collection.mutable.ArrayBuffer
 
 import com.twitter.hpack.{Decoder, HeaderListener}
 
@@ -53,14 +53,14 @@ final class SeqTupleHeaderDecoder(maxHeaderSize: Int,
                                  maxHeaderTable: Int  = DefaultSettings.HEADER_TABLE_SIZE)
   extends HeaderDecoder[Seq[(String, String)]](maxHeaderSize, maxHeaderTable) {
 
-  private val acc = new ListBuffer[(String, String)]
+  private var acc = new ArrayBuffer[(String, String)]
 
   override def addHeader(name: String, value: String, sensitive: Boolean): Unit = acc += ((name, value))
 
   /** Returns the header collection and clears the builder */
-  override def result(): List[(String, String)] = {
-    val r = acc.result()
-    acc.clear()
+  override def result(): Seq[(String, String)] = {
+    val r = acc
+    acc = new ArrayBuffer[(String, String)](r.size + 10)
     r
   }
 

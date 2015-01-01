@@ -10,7 +10,7 @@ import org.http4s.websocket.WebsocketHandshake
 import scala.util.control.NonFatal
 import scala.util.{Failure, Success}
 import scala.concurrent.Future
-import scala.collection.mutable.ListBuffer
+import scala.collection.mutable.ArrayBuffer
 import org.http4s.blaze.http.http_parser.Http1ServerParser
 
 import org.http4s.blaze.http.http_parser.BaseExceptions.BadRequest
@@ -32,7 +32,7 @@ abstract class HttpServerStage(maxReqBody: Int) extends Http1ServerParser with T
   private var method: String = null
   private var minor: Int = -1
   private var major: Int = -1
-  private val headers = new ListBuffer[(String, String)]
+  private var headers = new ArrayBuffer[(String, String)]
   
   def handleRequest(method: String, uri: String, headers: Headers, body: ByteBuffer): Future[Response]
   
@@ -77,10 +77,10 @@ abstract class HttpServerStage(maxReqBody: Int) extends Http1ServerParser with T
       // TODO: need to check if we need a Host header or otherwise validate the request
 
       // we have enough to start the request
-      gatherBody(buff, new ListBuffer[ByteBuffer]).onComplete {
+      gatherBody(buff, new ArrayBuffer[ByteBuffer]).onComplete {
         case Success(b) =>
-          val hdrs = headers.result()
-          headers.clear()
+          val hdrs = headers
+          headers = new ArrayBuffer[(String, String)](hdrs.size + 10)
           runRequest(b, hdrs)
         case Failure(t) => sendOutboundCommand(Cmd.Disconnect)
       }
@@ -190,15 +190,15 @@ abstract class HttpServerStage(maxReqBody: Int) extends Http1ServerParser with T
     sb.append('\r').append('\n')
   }
 
-  private def gatherBody(buffer: ByteBuffer, buffers: ListBuffer[ByteBuffer]): Future[ByteBuffer] = {
+  private def gatherBody(buffer: ByteBuffer, buffers: ArrayBuffer[ByteBuffer]): Future[ByteBuffer] = {
     if (!contentComplete()) {
       buffers += parseContent(buffer)
       channelRead().flatMap(gatherBody(_, buffers))
     } else {
-      val total = buffers.result match {
-        case Nil     => BufferTools.emptyBuffer
-        case b::Nil  => b
-        case buffers =>
+      val total = buffers.size match {
+        case 0 => BufferTools.emptyBuffer
+        case 1 => buffers.head
+        case _ =>
           val sz = buffers.foldLeft(0)(_ + _.remaining())
           val b = BufferTools.allocate(sz)
           buffers.foreach(b.put)

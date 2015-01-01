@@ -7,8 +7,6 @@ import org.http4s.blaze.util.BufferTools._
 
 import org.specs2.mutable.Specification
 
-import scala.collection.mutable.ListBuffer
-
 
 class Http20FrameCodecSpec extends Specification {
 

@@ -2,7 +2,7 @@ package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
 
-import scala.collection.mutable.ListBuffer
+import scala.collection.mutable.ArrayBuffer
 
 
 /* The job of the Http20FrameCodec is to slice the ByteBuffers. It does
@@ -172,7 +172,8 @@ trait Http20FrameDecoder {
       return Error(PROTOCOL_ERROR(s"SETTINGS frame with invalid stream id", streamId))
     }
 
-    val settings = new ListBuffer[Setting]
+    val settings = new ArrayBuffer[Setting](settingsCount)
+
     def go(remaining: Int): Unit = if (remaining > 0) {
       val id: Int = buffer.getShort() & 0xffff
       val value: Long = buffer.getInt() & 0xffffffffl
@@ -181,7 +182,7 @@ trait Http20FrameDecoder {
     }
     go(settingsCount)
 
-    handler.onSettingsFrame(isAck, settings.result)
+    handler.onSettingsFrame(isAck, settings)
   }
 
   //////////// PUSH_PROMISE ///////////////
