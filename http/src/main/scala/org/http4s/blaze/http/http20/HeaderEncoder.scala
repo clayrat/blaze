@@ -15,7 +15,7 @@ trait HeaderEncoder[T] {
 
   def setMaxTableSize(max: Int): Unit
 
-  def encodeHeaders(hs: T, done: Boolean): ByteBuffer
+  def encodeHeaders(hs: T): ByteBuffer
 }
 
 /** Simple Headers type for use in blaze and testing */
@@ -36,7 +36,7 @@ final class SeqTupleHeaderEncoder(private var maxTableSize: Int = DefaultSetting
     encoder.setMaxHeaderTableSize(os, max)
   }
 
-  override def encodeHeaders(hs: Seq[(String, String)], done: Boolean): ByteBuffer = {
+  override def encodeHeaders(hs: Seq[(String, String)]): ByteBuffer = {
     hs.foreach { case (k,v) => encoder.encodeHeader(os, k.getBytes(US_ASCII), v.getBytes(US_ASCII), false) }
     val buff = ByteBuffer.wrap(os.toByteArray())
     os.reset()

@@ -391,8 +391,8 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
               val buffs = codec.mkHeaderFrame(hs, id, priority, true, end_stream, 0)
               channelWrite(buffs)
 
-            case NodeMsg.PushPromiseFrame(promisedId, end_headers, hs) =>
-              val buffs = codec.mkPushPromiseFrame(id, promisedId, end_headers, 0, hs)
+            case NodeMsg.PushPromiseFrame(promisedId, hs) =>
+              val buffs = codec.mkPushPromiseFrame(id, promisedId, true, 0, hs)
               channelWrite(buffs)
 
             case NodeMsg.ExtensionFrame(tpe, flags, data) =>

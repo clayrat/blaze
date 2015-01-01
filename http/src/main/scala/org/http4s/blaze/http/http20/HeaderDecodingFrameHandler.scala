@@ -11,7 +11,11 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
 
   protected val headerDecoder: HeaderDecoder[HeaderType]
 
-  private case class HeadersInfo(sId: Int, priority: Option[Priority], end_stream: Boolean, isPromise: Boolean, var buffer: ByteBuffer)
+  private case class HeadersInfo(sId: Int,
+                            priority: Option[Priority],
+                          end_stream: Boolean,
+                           isPromise: Boolean,
+                          var buffer: ByteBuffer)
 
   private var hInfo: HeadersInfo = null
 
@@ -26,7 +30,7 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
 
   final def setMaxHeaderTableSize(maxSize: Int): Unit = { headerDecoder.setMaxTableSize(maxSize) }
 
-  override def inHeaderSequence(): Boolean = !headerDecoder.empty()
+  override def inHeaderSequence(): Boolean = hInfo != null
 
   final override def onHeadersFrame(streamId: Int,
                                     priority: Option[Priority],
@@ -38,9 +42,8 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
       return Error(PROTOCOL_ERROR("Received HEADERS frame while in in headers sequence"))
     }
 
-    headerDecoder.decode(buffer)
-
     if (end_headers) {
+      headerDecoder.decode(buffer)
       val hs = headerDecoder.result()
       onCompleteHeadersFrame(hs, streamId, priority, end_stream)
     }
@@ -56,9 +59,8 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
       return Error(PROTOCOL_ERROR("Received HEADERS frame while in in headers sequence"))
     }
 
-    headerDecoder.decode(buffer)
-
     if (end_headers) {
+      headerDecoder.decode(buffer)
       val hs = headerDecoder.result()
       onCompletePushPromiseFrame(hs, streamId, promisedId)
     }
@@ -75,13 +77,13 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
     }
 
     val newBuffer = BufferTools.concatBuffers(hInfo.buffer, buffer)
-
-    headerDecoder.decode(newBuffer)
     
     if (end_headers) {
+      headerDecoder.decode(newBuffer)
       val hs = headerDecoder.result()
-      val info = hInfo
-      hInfo = null;
+
+      val info = hInfo // make another reference and use it before we forget
+      hInfo = null
 
       if (info.isPromise) onCompletePushPromiseFrame(hs, streamId, info.priority.get.dependentStreamId)
       else onCompleteHeadersFrame(hs, streamId, info.priority, info.end_stream)

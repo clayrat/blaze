@@ -20,7 +20,7 @@ trait HeaderHttp20Encoder { self: Http20FrameEncoder =>
                     padding: Int
                            ): Seq[ByteBuffer] = {
 
-    val buffer = headerEncoder.encodeHeaders(headers, end_headers)
+    val buffer = headerEncoder.encodeHeaders(headers)
 
     mkHeaderFrame(buffer, streamId, priority, end_headers, end_stream, padding)
   }
@@ -30,12 +30,12 @@ trait HeaderHttp20Encoder { self: Http20FrameEncoder =>
                                   end_headers: Boolean,
                                   padding: Int,
                                   headers: Headers): Seq[ByteBuffer] = {
-    val buffer = headerEncoder.encodeHeaders(headers, end_headers)
+    val buffer = headerEncoder.encodeHeaders(headers)
     mkPushPromiseFrame(streamId, promiseId, end_headers, padding, buffer)
   }
 
   final def mkContinuationFrame(streamId: Int, end_headers: Boolean, headers: Headers): Seq[ByteBuffer] = {
-    val buffer = headerEncoder.encodeHeaders(headers, end_headers)
+    val buffer = headerEncoder.encodeHeaders(headers)
     mkContinuationFrame(streamId, end_headers, buffer)
   }
 }
