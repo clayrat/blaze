@@ -90,19 +90,15 @@ class Http20FrameCodecSpec extends Specification {
   "HEADERS frame" should {
     def dat = mkData(20)
 
-    def dec(sId: Int, sDep: Int, ex: Boolean, p: Int, end_h: Boolean,  end_s: Boolean) =
+    def dec(sId: Int, pri: Option[Priority], end_h: Boolean,  end_s: Boolean) =
       decoder(new MockFrameHandler(false) {
         override def onHeadersFrame(streamId: Int,
-                                    streamDep: Int,
-                                    exclusive: Boolean,
-                                    priority: Int,
+                                    priority: Option[Priority],
                                     end_headers: Boolean,
                                     end_stream: Boolean,
                                     buffer: ByteBuffer): Http2Result = {
           sId must_== streamId
-          sDep must_== streamDep
-          ex must_== exclusive
-          p must_== priority
+          pri must_== priority
           end_h must_== end_headers
           end_s must_== end_stream
           assert(compare(buffer::Nil, dat::Nil))
@@ -111,68 +107,62 @@ class Http20FrameCodecSpec extends Specification {
     })
 
     "make round trip" in {
-      val buff1 = joinBuffers(encoder.mkHeaderFrame(dat, 1, 1, false, 1, true, true, 0))
-      dec(1, 1, false, 1, true, true).decodeBuffer(buff1) must_== Continue
+      val buff1 = joinBuffers(encoder.mkHeaderFrame(dat, 1, None, true, true, 0))
+      dec(1, None, true, true).decodeBuffer(buff1) must_== Continue
       buff1.remaining() must_== 0
 
-      val buff2 = joinBuffers(encoder.mkHeaderFrame(dat, 2, 3, false, 6, true, false, 0))
-      dec(2, 3, false, 6, true, false).decodeBuffer(buff2) must_== Continue
+      val buff2 = joinBuffers(encoder.mkHeaderFrame(dat, 2, Some(Priority(3, false, 6)), true, false, 0))
+      dec(2, Some(Priority(3, false, 6)), true, false).decodeBuffer(buff2) must_== Continue
       buff2.remaining() must_== 0
     }
 
     "preserve padding" in {
-      val buff = addBonus(encoder.mkHeaderFrame(dat, 1, 1, false, 1, true, true, 0))
-      dec(1, 1, false, 1, true, true).decodeBuffer(buff) must_== Continue
+      val buff = addBonus(encoder.mkHeaderFrame(dat, 1, None, true, true, 0))
+      dec(1, None, true, true).decodeBuffer(buff) must_== Continue
       buff.remaining() must_== bonusSize
     }
 
-    "fail on bad stream dependency" in {
-      encoder.mkHeaderFrame(dat, 1, 0, false, 1, true, true, 0) must throwA[Exception]
-    }
-
     "fail on bad stream ID" in {
-      encoder.mkHeaderFrame(dat,0 , 1, false, 1, true, true, 0) must throwA[Exception]
+      encoder.mkHeaderFrame(dat,0 , None, true, true, 0) must throwA[Exception]
     }
 
     "fail on bad padding" in {
-      encoder.mkHeaderFrame(dat,1 , 1, false, 1, true, true, -10) must throwA[Exception]
-      encoder.mkHeaderFrame(dat,1 , 1, false, 1, true, true, 500) must throwA[Exception]
+      encoder.mkHeaderFrame(dat,1 , None, true, true, -10) must throwA[Exception]
+      encoder.mkHeaderFrame(dat,1 , None, true, true, 500) must throwA[Exception]
     }
   }
 
   "PRIORITY frame" should {
-    def dec(sId: Int, sDep: Int, ex: Boolean, p: Int) =
+    def dec(sId: Int, p: Priority) =
       decoder(new MockFrameHandler(false) {
-        override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): Http2Result = {
+        override def onPriorityFrame(streamId: Int, priority: Priority): Http2Result = {
           sId must_== streamId
-          sDep must_== streamDep
-          ex must_== exclusive
           p must_== priority
           Continue
         }
       })
 
     "make a round trip" in {
-      val buff1 = encoder.mkPriorityFrame(1, 1, true, 1)
-      dec(1, 1, true, 1).decodeBuffer(buff1) must_== Continue
+      val buff1 = encoder.mkPriorityFrame(1, Priority(1, true, 1))
+      dec(1, Priority(1, true, 1)).decodeBuffer(buff1) must_== Continue
       buff1.remaining() must_== 0
 
-      val buff2 = encoder.mkPriorityFrame(1, 1, false, 10)
-      dec(1, 1, false, 10).decodeBuffer(buff2) must_== Continue
+      val buff2 = encoder.mkPriorityFrame(1, Priority(1, false, 10))
+      dec(1, Priority(1, false, 10)).decodeBuffer(buff2) must_== Continue
       buff2.remaining() must_== 0
     }
 
     "fail on bad priority" in {
-      encoder.mkPriorityFrame(1, 1, true, 500) must throwA[Exception]
-      encoder.mkPriorityFrame(1, 1, true, -500) must throwA[Exception]
+      Priority(1, true, 500) must throwA[Exception]
+      Priority(1, true, -500) must throwA[Exception]
     }
 
     "fail on bad streamId" in {
-      encoder.mkPriorityFrame(0, 1, true, 0) must throwA[Exception]
+      encoder.mkPriorityFrame(0, Priority(1, true, 0)) must throwA[Exception]
     }
 
     "fail on bad stream dependency" in {
-      encoder.mkPriorityFrame(1, 0, true, 0) must throwA[Exception]
+      Priority(0, true, 0) must throwA[Exception]
     }
   }
 
@@ -228,17 +218,13 @@ class Http20FrameCodecSpec extends Specification {
   }
 
   "HEADERS frame with compressors" should {
-    def dec(sId: Int, sDep: Int, ex: Boolean, p: Int, es: Boolean, hs: Seq[(String, String)]) =
+    def dec(sId: Int, p: Option[Priority], es: Boolean, hs: Seq[(String, String)]) =
       decoder(new MockHeaderDecodingFrameHandler {
         override def onCompleteHeadersFrame(headers: Seq[(String,String)],
                                             streamId: Int,
-                                            streamDep: Int,
-                                            exclusive: Boolean,
-                                            priority: Int,
+                                            priority: Option[Priority],
                                             end_stream: Boolean): Http2Result = {
           sId must_== streamId
-          sDep must_== streamDep
-          ex must_== exclusive
           p must_== priority
           es must_== end_stream
           hs must_== headers
@@ -248,16 +234,16 @@ class Http20FrameCodecSpec extends Specification {
 
     "Make a simple round trip" in {
       val hs = Seq("foo" -> "bar", "biz" -> "baz")
-      val bs = hencoder.mkHeaderFrame(hs, 1, 0, false, -1, true, true, 0)
+      val bs = hencoder.mkHeaderFrame(hs, 1, None, true, true, 0)
 
-      dec(1, 0, false, 16, true, hs).decodeBuffer(BufferTools.joinBuffers(bs)) must_== Halt
+      dec(1, None, true, hs).decodeBuffer(BufferTools.joinBuffers(bs)) must_== Halt
     }
 
     "Make a round trip with a continuation frame" in {
       val hs = Seq("foo" -> "bar", "biz" -> "baz")
-      val bs = hencoder.mkHeaderFrame(hs, 1, 0, false, -1, false, true, 0)
+      val bs = hencoder.mkHeaderFrame(hs, 1, None, false, true, 0)
 
-      val decoder = dec(1, 0, false, 16, true, hs)
+      val decoder = dec(1, None, true, hs)
 
       decoder.inHeaderSequence() must_== false
       decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue

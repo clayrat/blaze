@@ -9,14 +9,12 @@ trait FrameHandler {
   def onDataFrame(streamId: Int, isLast: Boolean, data: ByteBuffer, flowSize: Int): Http2Result
 
   def onHeadersFrame(streamId: Int,
-                    streamDep: Int,
-                    exclusive: Boolean,
-                     priority: Int,
+                     priority: Option[Priority],
                   end_headers: Boolean,
                    end_stream: Boolean,
                    buffer: ByteBuffer): Http2Result
 
-  def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): Http2Result
+  def onPriorityFrame(streamId: Int, priority: Priority): Http2Result
 
   def onRstStreamFrame(streamId: Int, code: Int): Http2Result
 

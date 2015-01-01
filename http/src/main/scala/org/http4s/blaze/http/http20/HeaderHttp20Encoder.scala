@@ -14,9 +14,7 @@ trait HeaderHttp20Encoder { self: Http20FrameEncoder =>
   final def mkHeaderFrame(
                      headers: Headers,
                     streamId: Int,
-                    dependentStreamId: Int,
-                    exclusive: Boolean,
-                    priority: Int,
+                    priority: Option[Priority],
                     end_headers: Boolean,
                     end_stream: Boolean,
                     padding: Int
@@ -24,8 +22,7 @@ trait HeaderHttp20Encoder { self: Http20FrameEncoder =>
 
     val buffer = headerEncoder.encodeHeaders(headers, end_headers)
 
-    mkHeaderFrame(buffer, streamId, dependentStreamId, exclusive,
-                  priority, end_headers, end_stream, padding)
+    mkHeaderFrame(buffer, streamId, priority, end_headers, end_stream, padding)
   }
 
   final def mkPushPromiseFrame(streamId: Int,

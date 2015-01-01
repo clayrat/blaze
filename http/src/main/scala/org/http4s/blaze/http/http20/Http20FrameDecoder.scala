@@ -106,14 +106,13 @@ trait Http20FrameDecoder {
       if (!r.success) return r
     }
 
-    val isPriority = Flags.PRIORITY(flags)
+    val priority =  if (Flags.PRIORITY(flags)) Some(getPriority(buffer))
+                    else None
 
-    val dInt = if (isPriority) buffer.getInt() else 0
-    val priority = if (isPriority) (buffer.get() & 0xff) + 1 else 16
-
-    handler.onHeadersFrame(streamId, Flags.DepID(dInt), Flags.DepExclusive(dInt),
-      priority, Flags.END_HEADERS(flags), Flags.END_STREAM(flags), buffer.slice())
+    handler.onHeadersFrame(streamId, priority, Flags.END_HEADERS(flags), Flags.END_STREAM(flags), buffer.slice())
   }
+
+
 
   //////////// PRIORITY ///////////////
   private def decodePriorityFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
@@ -126,16 +125,17 @@ trait Http20FrameDecoder {
       return Error(FRAME_SIZE_ERROR("Invalid PRIORITY frame size, required 5, received" + buffer.remaining(), streamId))
     }
 
-    val r = buffer.getInt()
-    val streamDep = Flags.DepID(r)
-    val exclusive = Flags.DepExclusive(r)
+    val priority = getPriority(buffer)
 
+    if (priority.dependentStreamId == 0) Error(PROTOCOL_ERROR("Priority frame with stream dependency 0x0"))
+    else handler.onPriorityFrame(streamId, priority)
+  }
+
+  private def getPriority(buffer: ByteBuffer): Priority = {
+    val rawInt = buffer.getInt()
     val priority = (buffer.get() & 0xff) + 1
-
-    if (streamDep == 0) {
-      return Error(PROTOCOL_ERROR("Priority frame with stream dependency 0x0"))
-    }
-    else handler.onPriorityFrame(streamId, streamDep, exclusive, priority)
+    val ex = Flags.DepExclusive(rawInt)
+    Priority(Flags.DepID(rawInt), ex, priority)
   }
 
   //////////// RST_STREAM ///////////////

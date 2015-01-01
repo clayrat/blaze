@@ -20,13 +20,12 @@ class Http2Handler extends TailStage[NodeMsg.Http2Msg[Seq[(String,String)]]] {
 
   override protected def stageStartup(): Unit = {
     super.stageStartup()
-
     readLoop()
   }
 
   def handleMsg(msg: Http2Msg): Unit = msg match {
       // We don't want any bodies on here...
-    case NodeMsg.HeadersFrame(streamId, ex, true, hs) =>
+    case NodeMsg.HeadersFrame(_, true, hs) =>
 
       val tail = "" //(0 to 1024*1024).mkString("\n")
 
@@ -38,7 +37,7 @@ class Http2Handler extends TailStage[NodeMsg.Http2Msg[Seq[(String,String)]]] {
                  // pseudo-header status
       val hss = Seq((":status", "200"), ("content-type", "text/plain; charset=utf8"))
 
-      val hframe = NodeMsg.HeadersFrame(streamId, ex, false, hss)
+      val hframe = NodeMsg.HeadersFrame(None, false, hss)
       val bframe = NodeMsg.DataFrame(true, body)
 
       channelWrite(Seq(hframe, bframe)).onComplete {

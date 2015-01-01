@@ -29,26 +29,23 @@ trait Http20FrameEncoder {
 
   def mkHeaderFrame(headerData: ByteBuffer,
                     streamId: Int,
-                    dependentStreamId: Int,
-                    exclusive: Boolean,
-                    priority: Int,
+                    priority: Option[Priority],
                     end_headers: Boolean,
                     end_stream: Boolean,
                     padding: Int): Seq[ByteBuffer] = {
 
     require(streamId > 0, "bad HEADER frame stream ID")
     require(padding >= 0 && padding < 255, "Invalid padding of HEADER frame")
-    require(priority <= 256, "Weight must be 1 to 256")
 
     var flags: Int = 0;
     var size1 = HeaderSize;
 
     if (padding > 0) {
-      size1 += 1
+      size1 += 1          // padding byte
       flags |= Flags.PADDED
     }
 
-    if (priority >= 0) {
+    if (priority.nonEmpty) {
       size1 += 4 + 1      // stream dep and weight
       flags |= Flags.PRIORITY
     }
@@ -63,13 +60,9 @@ trait Http20FrameEncoder {
       header.put(padding.toByte)
     }
 
-    if (priority >= 0) {
-      require(dependentStreamId > 0)
-
-      val i = dependentStreamId | (if (exclusive) Masks.exclsive else 0)
-      header.putInt(i)
-
-      header.put((priority-1).toByte)
+    priority match {
+      case Some(p) => writePriority(p, header)
+      case None    => // NOOP
     }
 
     header.flip()
@@ -77,17 +70,15 @@ trait Http20FrameEncoder {
     header::headerData::paddedTail(padding)
   }
 
-  def mkPriorityFrame(streamId: Int, depId: Int, exclusive: Boolean, priority: Int): ByteBuffer = {
-
-    require(priority > 0 && priority <= 256)
+  def mkPriorityFrame(streamId: Int, priority: Priority): ByteBuffer = {
+    require(streamId > 0, "Invalid streamID for PRIORITY frame")
 
     val size = 5
 
     val buffer = BufferTools.allocate(HeaderSize + size)
     writeFrameHeader(size, FrameTypes.PRIORITY, 0, streamId, buffer)
 
-    buffer.putInt(depId | (if (exclusive) Masks.exclsive else 0))
-    buffer.put(((priority - 1) & 0xff).toByte)
+    writePriority(priority, buffer)
     buffer.flip()
 
     buffer
@@ -201,11 +192,17 @@ trait Http20FrameEncoder {
     buffer::headerBuffer::Nil
   }
 
+  //////////////////////////////////////////////////////////////////////////////////////////
+
+  private def writePriority(p: Priority, buffer: ByteBuffer): Unit = {
+    buffer.putInt(p.dependentStreamId | (if (p.exclusive) Masks.exclsive else 0))
+    buffer.put(((p.priority - 1) & 0xff).toByte)
+  }
+
   private def paddedTail(padding: Int): List[ByteBuffer] = {
     if (padding > 0) BufferTools.allocate(padding)::Nil
     else             Nil
   }
-
 
   private def writeFrameHeader(length: Int, frameType: Byte, flags: Byte, streamdId: Int, buffer: ByteBuffer): Unit = {
     buffer.put((length >>> 16 & 0xff).toByte)

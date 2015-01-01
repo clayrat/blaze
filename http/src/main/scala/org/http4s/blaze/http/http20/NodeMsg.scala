@@ -8,11 +8,9 @@ object NodeMsg {
 
   case class DataFrame(isLast: Boolean, data: ByteBuffer) extends Http2Msg[Nothing]
 
-  case class HeadersFrame[HType](
-                     streamDep: Int,
-                     exclusive: Boolean,
-                     end_stream: Boolean,
-                     headers: HType) extends Http2Msg[HType]
+  case class HeadersFrame[HType](priority: Option[Priority],
+                               end_stream: Boolean,
+                                  headers: HType) extends Http2Msg[HType]
 
 //  case class PriorityFrame(streamDep: Int, exclusive: Boolean, priority: Int) extends Http2Msg
 

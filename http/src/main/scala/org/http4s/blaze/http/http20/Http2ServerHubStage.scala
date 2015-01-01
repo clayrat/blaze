@@ -34,8 +34,6 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
   override type Key = Int
   override type Out = Http2Msg
-
-  // TODO: attachment sucks to use: it leaks the type of the Attachment etc. Can I do better?
   override protected type Attachment = FlowControl.NodeState
 
   // Using synchronization and this is the lock
@@ -161,7 +159,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
                                              .getOrElse(sys.error(s"Attempted to make stream that already exists"))
 
 
-  /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  ///////////////////////// The FrameHandler decides how to decode incoming frames ///////////////////////
   
   // All the methods in here will be called from `codec` and thus synchronization can be managed through codec calls
   private object FHandler extends HeaderDecodingFrameHandler {
@@ -172,8 +170,12 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
     override def onCompletePushPromiseFrame(headers: HeaderType, streamId: Int, promisedId: Int): Http2Result =
       Error(PROTOCOL_ERROR("Server received a PUSH_PROMISE frame from a client", streamId))
 
-    override def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_stream: Boolean): Http2Result = {
-      val msg = NodeMsg.HeadersFrame(streamDep, exclusive, end_stream, headers)
+    override def onCompleteHeadersFrame(headers: HeaderType,
+                                       streamId: Int,
+                                       priority: Option[Priority],
+                                     end_stream: Boolean): Http2Result =
+    {
+      val msg = NodeMsg.HeadersFrame(priority, end_stream, headers)
 
       getNode(streamId) match {
         case None =>
@@ -210,68 +212,56 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
     override def onSettingsFrame(ack: Boolean, settings: Seq[Setting]): Http2Result = {
       logger.trace(s"Received settings frames: $settings, ACK: $ack")
-      if (ack) Continue    // TODO: check acknolegments?
+      if (ack) Continue    // TODO: ensure client sends acknolegments?
       else {
-        @tailrec
-        def go(settings: Seq[Setting]): MaybeError = {
-          if (settings.isEmpty) Continue
-          else {
-            val r = settings.head match {
-              case Setting(SETTINGS_HEADER_TABLE_SIZE, v) =>
-                codec.setEncoderMaxTable(v.toInt)
-                Continue
-
-              case Setting(SETTINGS_ENABLE_PUSH, v) =>
-                if (v == 0) {
-                  push_enable = false; Continue
-                }
-                else if (v == 1) {
-                  push_enable = true; Continue
-                }
-                else Error(PROTOCOL_ERROR(s"Invalid ENABLE_PUSH setting value: $v"))
-
-              case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) =>
-                if (v > Integer.MAX_VALUE) {
-                  Error(PROTOCOL_ERROR(s"To large MAX_CONCURRENT_STREAMS: $v"))
-                } else {
-                  max_streams = v.toInt; Continue
-                }
-
-              case Setting(SETTINGS_INITIAL_WINDOW_SIZE, v) =>
-                if (v > Integer.MAX_VALUE) Error(PROTOCOL_ERROR(s"Invalid initial window size: $v"))
-                else {
-                  FlowControl.onInitialWindowSizeChange(v.toInt); Continue
-                }
-
-              case Setting(SETTINGS_MAX_FRAME_SIZE, v) =>
-                // max of 2^24-1 http/2.0 draft 16 spec
-                if (v < MAX_FRAME_SIZE || v > 16777215) Error(PROTOCOL_ERROR(s"Invalid frame size: $v"))
-                else {
-                  max_frame_size = v.toInt; Continue
-                }
-
-
-              case Setting(SETTINGS_MAX_HEADER_LIST_SIZE, v) =>
-                if (v > Integer.MAX_VALUE) Error(PROTOCOL_ERROR(s"SETTINGS_MAX_HEADER_LIST_SIZE to large: $v"))
-                else {
-                  max_header_size = v.toInt; Continue
-                }
-
-              case Setting(k, v) =>
-                logger.warn(s"Unknown setting ($k, $v)")
-                Continue
-            }
-            if (r.success) go(settings.tail)
-            else r
-          }
-        }
-
-        val r = go(settings)
+        val r = processSettings(settings)
         if (r.success) {
           val buff = codec.mkSettingsFrame(true, Nil)
           channelWrite(buff) // write the ACK settings frame
         }
         r
+      }
+    }
+
+    @tailrec
+    private def processSettings(settings: Seq[Setting]): MaybeError = {
+      if (settings.isEmpty) Continue
+      else {
+        val r = settings.head match {
+          case Setting(SETTINGS_HEADER_TABLE_SIZE, v) =>
+            codec.setEncoderMaxTable(v.toInt)
+            Continue
+
+          case Setting(SETTINGS_ENABLE_PUSH, v) =>
+            if (v == 0) { push_enable = false; Continue }
+            else if (v == 1) {  push_enable = true; Continue }
+            else Error(PROTOCOL_ERROR(s"Invalid ENABLE_PUSH setting value: $v"))
+
+          case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) =>
+            if (v > Integer.MAX_VALUE) {
+              Error(PROTOCOL_ERROR(s"To large MAX_CONCURRENT_STREAMS: $v"))
+            } else { max_streams = v.toInt; Continue }
+
+          case Setting(SETTINGS_INITIAL_WINDOW_SIZE, v) =>
+            if (v > Integer.MAX_VALUE) Error(PROTOCOL_ERROR(s"Invalid initial window size: $v"))
+            else { FlowControl.onInitialWindowSizeChange(v.toInt); Continue }
+
+          case Setting(SETTINGS_MAX_FRAME_SIZE, v) =>
+            // max of 2^24-1 http/2.0 draft 16 spec
+            if (v < MAX_FRAME_SIZE || v > 16777215) Error(PROTOCOL_ERROR(s"Invalid frame size: $v"))
+            else { max_frame_size = v.toInt; Continue }
+
+
+          case Setting(SETTINGS_MAX_HEADER_LIST_SIZE, v) =>
+            if (v > Integer.MAX_VALUE) Error(PROTOCOL_ERROR(s"SETTINGS_MAX_HEADER_LIST_SIZE to large: $v"))
+            else { max_header_size = v.toInt; Continue }
+
+          case Setting(k, v) =>
+            logger.warn(s"Unknown setting ($k, $v)")
+            Continue
+        }
+        if (r.success) processSettings(settings.tail)
+        else r
       }
     }
 
@@ -300,7 +290,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       }
     }
 
-    override def onPriorityFrame(streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int): Http2Result = {
+    override def onPriorityFrame(streamId: Int, priority: Priority): Http2Result = {
       // TODO: should we implement some type of priority handling?
       Continue
     }
@@ -397,9 +387,8 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
               val p = Promise[Unit]
               writeDataFrame(p, frame)
 
-            case NodeMsg.HeadersFrame(dep, ex, end_stream, hs) =>
-              val priority = if (dep > 0) 16 else -1
-              val buffs = codec.mkHeaderFrame(hs, id, dep, ex, priority, true, end_stream, 0)
+            case NodeMsg.HeadersFrame(priority, end_stream, hs) =>
+              val buffs = codec.mkHeaderFrame(hs, id, priority, true, end_stream, 0)
               channelWrite(buffs)
 
             case NodeMsg.PushPromiseFrame(promisedId, end_headers, hs) =>
@@ -517,7 +506,6 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         }
       }
     }
-
   }
 }
 

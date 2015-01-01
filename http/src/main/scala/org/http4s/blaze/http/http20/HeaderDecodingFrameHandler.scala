@@ -11,14 +11,14 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
 
   protected val headerDecoder: HeaderDecoder[HeaderType]
 
-  private case class HeadersInfo(sId: Int, sDep: Int, ex: Boolean, priority: Int, end_stream: Boolean, isPromise: Boolean, var buffer: ByteBuffer)
+  private case class HeadersInfo(sId: Int, priority: Option[Priority], end_stream: Boolean, isPromise: Boolean, var buffer: ByteBuffer)
 
   private var hInfo: HeadersInfo = null
 
 
   ///////////////////////////////////////////////////////////////////////////
   
-  def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, streamDep: Int, exclusive: Boolean, priority: Int, end_stream: Boolean): Http2Result
+  def onCompleteHeadersFrame(headers: HeaderType, streamId: Int, priority: Option[Priority], end_stream: Boolean): Http2Result
 
   def onCompletePushPromiseFrame(headers: HeaderType, streamId: Int, promisedId: Int): Http2Result
 
@@ -29,12 +29,10 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
   override def inHeaderSequence(): Boolean = !headerDecoder.empty()
 
   final override def onHeadersFrame(streamId: Int,
-                                  streamDep: Int,
-                                  exclusive: Boolean,
-                                  priority: Int,
-                                  end_headers: Boolean,
+                                    priority: Option[Priority],
+                                 end_headers: Boolean,
                                   end_stream: Boolean,
-                                  buffer: ByteBuffer): Http2Result = {
+                                      buffer: ByteBuffer): Http2Result = {
 
     if (inHeaderSequence()) {
       return Error(PROTOCOL_ERROR("Received HEADERS frame while in in headers sequence"))
@@ -44,10 +42,10 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
 
     if (end_headers) {
       val hs = headerDecoder.result()
-      onCompleteHeadersFrame(hs, streamId, streamDep, exclusive, priority, end_stream)
+      onCompleteHeadersFrame(hs, streamId, priority, end_stream)
     }
     else {
-      hInfo = HeadersInfo(streamId, streamDep, exclusive, priority, end_stream, false, buffer)
+      hInfo = HeadersInfo(streamId, priority, end_stream, false, buffer)
       Continue
     }
   }
@@ -65,7 +63,7 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
       onCompletePushPromiseFrame(hs, streamId, promisedId)
     }
     else {
-      hInfo = HeadersInfo(streamId, promisedId, false, -1, false, true, buffer)
+      hInfo = HeadersInfo(streamId, Some(Priority(promisedId, false, -1)), false, true, buffer)
       Continue
     }
   }
@@ -85,8 +83,8 @@ abstract class HeaderDecodingFrameHandler extends FrameHandler {
       val info = hInfo
       hInfo = null;
 
-      if (info.isPromise) onCompletePushPromiseFrame(hs, streamId, info.sDep)
-      else onCompleteHeadersFrame(hs, streamId, info.sDep, info.ex, info.priority, info.end_stream)
+      if (info.isPromise) onCompletePushPromiseFrame(hs, streamId, info.priority.get.dependentStreamId)
+      else onCompleteHeadersFrame(hs, streamId, info.priority, info.end_stream)
     }
     else {
       hInfo.buffer = newBuffer

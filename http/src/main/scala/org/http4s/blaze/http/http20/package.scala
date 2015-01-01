@@ -8,6 +8,11 @@ import scala.collection.mutable
 import scala.util.control.NoStackTrace
 
 package object http20 {
+
+  case class Priority(dependentStreamId: Int, exclusive: Boolean, priority: Int) {
+    require(dependentStreamId >= 0, "Invalid stream dependency")
+    require(priority > 0 && priority <= 256, "Weight must be 1 to 256")
+  }
   
   val HeaderSize = 9
   def clientTLSHandshakeString = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
