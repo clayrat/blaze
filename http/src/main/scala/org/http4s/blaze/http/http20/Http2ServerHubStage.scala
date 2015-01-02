@@ -18,7 +18,7 @@ import scala.concurrent.{Promise, Future}
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
-
+// TODO: is it best to stick with extending the WriteSerializer?
 final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
                                        headerEncoder: HeaderEncoder[HType],
                                         node_builder: () => LeafBuilder[NodeMsg.Http2Msg[HType]],
@@ -54,7 +54,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
   /////////////////////////////////////////////////////////////////////////////////
 
-  private val codec = new Http20FrameCodec(FHandler) with HeaderHttp20Encoder {
+  private val codec = new Http20FrameCodec(FrameHandler) with HeaderHttp20Encoder {
     override type Headers = HType
     override protected val headerEncoder = hub.headerEncoder
   }
@@ -163,7 +163,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   ///////////////////////// The FrameHandler decides how to decode incoming frames ///////////////////////
   
   // All the methods in here will be called from `codec` and thus synchronization can be managed through codec calls
-  private object FHandler extends HeaderDecodingFrameHandler {
+  private object FrameHandler extends HeaderDecodingFrameHandler {
     override type HeaderType = HType
 
     override protected val headerDecoder = hub.headerDecoder
@@ -497,26 +497,3 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   }
 }
 
-class StreamIdManager {
-  private var _lastClientId: Int = 0
-  private var _nextServerId: Int = 2
-  
-  /** Determine if the client ID is valid based on the stream history */
-  def checkClientId(id: Int): Boolean = {
-    if (id > _lastClientId && id % 2 == 1) {
-      _lastClientId = id
-      true
-    }
-    else false
-  }
-
-  /** Get the identifier of the last received client stream */
-  def lastClientId(): Int = _lastClientId
-  
-  /** Get the next valid server id */
-  def nextServerId(): Int = {
-    val id = _nextServerId
-    _nextServerId += 2
-    id
-  }
-}
