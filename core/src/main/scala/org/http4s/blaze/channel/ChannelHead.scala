@@ -11,19 +11,25 @@ trait ChannelHead extends HeadStage[ByteBuffer] {
   import ChannelHead.brokePipeMessages
 
   /** Close the channel with an error
-    * __NOTE:__ EOF is a valid error to close the channel
-    * with and signals normal termination */
+    * __NOTE:__ EOF is a valid error to close the channel with and signals normal termination.
+    * This method should __not__ send a [[Disconnected]] command. */
   protected def closeWithError(t: Throwable): Unit
 
-  /** Close the channel under normal conditions */
-  final def closeChannel(): Unit = closeWithError(EOF)
-
-  override def outboundCommand(cmd: OutboundCommand): Unit = cmd match {
-    case Disconnect => closeChannel()
-    case Error(e)   => closeChannel(); super.outboundCommand(cmd)
-    case cmd        => super.outboundCommand(cmd)
+  /** Close the channel under normal conditions. A [[Disconnected]] command will be sent */
+  final def closeChannel(): Unit = {
+    sendInboundCommand(Disconnected)
+    closeWithError(EOF)
   }
 
+  override def outboundCommand(cmd: OutboundCommand): Unit = cmd match {
+      case Disconnect => closeWithError(EOF)
+      case Error(e)   => closeWithError(e)
+      case cmd        => // NOOP
+  }
+
+  /** Checks the error. If the error is determined to be fatal to the channel, it will be
+    * closed with `closeChannel()`, and thus a [[Disconnected]] command will be emitted.
+    */
   protected def checkError(e: Throwable): Throwable = e match {
     case EOF =>
       logger.warn("Unhandled EOF")

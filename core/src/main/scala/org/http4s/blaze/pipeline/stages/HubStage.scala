@@ -113,14 +113,16 @@ abstract class HubStage[I] extends TailStage[I] {
   ////////////////////////////////////////////////////////////
 
   private def checkShutdown(node: NodeHead): Unit = {
-    if (node.isConnected()) node.stageShutdown()
+    if (node.isConnected()) node.sendInboundCommand(Disconnected)
   }
 
   ////////////////////////////////////////////////////////////
 
-  private[HubStage] class NodeHead(val key: Key, val attachment: Attachment) extends HeadStage[Out] with Node {
+  private[HubStage] final class NodeHead(val key: Key, val attachment: Attachment)
+    extends HeadStage[Out] with Node
+  {
 
-    def name: String = "HubStage Hub Head"
+    def name: String = "HubStage_HubHead"
     private var connected = false
     private var initialized = false
 
@@ -142,6 +144,7 @@ abstract class HubStage[I] extends TailStage[I] {
       onNodeCommand(this, cmd)
 
     override def stageStartup(): Unit = {
+      super.stageStartup()
       connected = true
       initialized = true
     }

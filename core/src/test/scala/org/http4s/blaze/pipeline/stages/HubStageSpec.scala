@@ -68,18 +68,18 @@ class HubStageSpec extends Specification {
     "Shutdown nodes" in {
 
       val closed = new AtomicInteger(0)
+      val started = new AtomicInteger(0)
 
       class Echo2 extends TailStage[Any] {
         def name = "Echo2"
         override protected def stageShutdown(): Unit = {
           closed.incrementAndGet()
+          super.stageShutdown()
         }
 
         override protected def stageStartup(): Unit = {
-          channelRead().onComplete {
-            case Failure(EOF) => stageShutdown()
-            case o            => sys.error("Shouldn't get here.")
-          }(trampoline)
+          super.stageStartup()
+          started.incrementAndGet()
         }
       }
 
@@ -101,7 +101,11 @@ class HubStageSpec extends Specification {
 
       closed.get() must_== 0
       h.inboundCommand(Connected)
+      started.get() must_== 2
+      closed.get() must_== 0
 
+      h.inboundCommand(Disconnected)
+      started.get() must_== 2
       closed.get() must_== 2
     }
 

@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
 import java.lang.{Long => JLong}
 
 final class ByteBufferHead(channel: AsynchronousSocketChannel,
-                           bufferSize: Int = 8*1024) extends ChannelHead {
+                        bufferSize: Int = 8*1024) extends ChannelHead {
 
   def name: String = "ByteBufferHeadStage"
 
@@ -112,14 +112,17 @@ final class ByteBufferHead(channel: AsynchronousSocketChannel,
       closeChannel()
       EOF
 
-    case e: Throwable =>  // Don't know what to do besides close
-      super.checkError(e)
+    case e: Throwable => super.checkError(e)
   }
 
-  override protected def stageShutdown(): Unit = closeChannel()
+  override protected def stageShutdown(): Unit = closeWithError(EOF)
 
   override protected def closeWithError(t: Throwable): Unit = {
-    logger.debug("channelClose")
+    t match {
+      case EOF => logger.debug(s"closeWithError(EOF)")
+      case t   => logger.error(t)("NIO2 channel closed with unexpected error")
+    }
+
     try channel.close()
     catch { case e: IOException => /* Don't care */ }
   }

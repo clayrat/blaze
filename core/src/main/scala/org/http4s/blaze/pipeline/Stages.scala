@@ -36,8 +36,23 @@ sealed trait Stage {
 
   def name: String
 
+  /** Start the stage, allocating resources etc.
+    *
+    * This method should not effect other stages by sending commands etc unless it creates them.
+    * It is not impossible that the stage will receive other commands besides [[Connected]]
+    * before this method is called. It is not impossible for this method to be called multiple
+    * times by misbehaving stages. It is therefor recommended that the method be idempotent.
+    */
   protected def stageStartup(): Unit = logger.debug(s"${getClass.getName} starting up at ${new Date}")
 
+  /** Shuts down the stage, deallocating resources, etc.
+    *
+    * This method will be called when the stages receives a [[Disconnected]] command unless the
+    * `inboundCommand` method is overridden. It is not impossible that this will not be called
+    * due to failure for other stages to propagate shutdown commands. Conversely, it is also
+    * possible for this to be called more than once due to the reception of multiple disconnect
+    * commands. It is therefor recommended that the method be idempotent.
+    */
   protected def stageShutdown(): Unit = logger.debug(s"${getClass.getName} shutting down at ${new Date}")
 
   /** Handle basic startup and shutdown commands.
@@ -47,6 +62,7 @@ sealed trait Stage {
     */
   def inboundCommand(cmd: InboundCommand): Unit = cmd match {
     case Connected     => stageStartup()
+    case Disconnected  => stageShutdown()
     case _             => logger.warn(s"$name received unhandled inbound command: $cmd")
   }
 }
@@ -59,19 +75,17 @@ sealed trait Tail[I] extends Stage {
       if (_prevStage != null) {
         val f = _prevStage.readRequest(size)
         checkTimeout(timeout, f)
-      } else stageDisconnected
+      } else _stageDisconnected
     }  catch { case t: Throwable => return Future.failed(t) }
   }
 
-  private def stageDisconnected: Future[Nothing] = {
-    Future.failed(new Exception(s"This stage '${this}' isn't connected!"))
-  }
+
 
   def channelWrite(data: I): Future[Unit] = {
     if (_prevStage != null) {
       try _prevStage.writeRequest(data)
       catch { case t: Throwable => Future.failed(t) }
-    } else stageDisconnected
+    } else _stageDisconnected
   }
 
   final def channelWrite(data: I, timeout: Duration): Future[Unit] = {
@@ -83,7 +97,7 @@ sealed trait Tail[I] extends Stage {
     if (_prevStage != null) {
       try _prevStage.writeRequest(data)
       catch { case t: Throwable => Future.failed(t) }
-    } else stageDisconnected
+    } else _stageDisconnected
   }
 
   final def channelWrite(data: Seq[I], timeout: Duration): Future[Unit] = {
@@ -132,9 +146,10 @@ sealed trait Tail[I] extends Stage {
 
     this match {
       case m: MidStage[_, _] =>
+        m.sendInboundCommand(Disconnected)
         m._nextStage = null
 
-      case _ => // NOOP
+      case _ => // NOOP, must be a TailStage
     }
 
     val prev = this._prevStage
@@ -143,7 +158,7 @@ sealed trait Tail[I] extends Stage {
 
     prev match {
       case m: MidStage[_, I] => leafBuilder.prepend(m)
-      case h: HeadStage[I] => leafBuilder.base(h)
+      case h: HeadStage[I]   => leafBuilder.base(h)
     }
 
     if (startup) prev.sendInboundCommand(Command.Connected)
@@ -184,6 +199,9 @@ sealed trait Tail[I] extends Stage {
       p.tryComplete(t)
     }(Execution.directec)
   }
+
+  private def _stageDisconnected: Future[Nothing] =
+    Future.failed(new Exception(s"This stage '$name' isn't connected!"))
 }
 
 sealed trait Head[O] extends Stage {
@@ -232,7 +250,7 @@ sealed trait Head[O] extends Stage {
     case Error(e)   =>
       logger.error(e)(s"$name received unhandled error command")
 
-    case _          => logger.warn(s"$name received unhandled outbound command: $cmd")
+    case cmd        => logger.warn(s"$name received unhandled outbound command: $cmd")
   }
 
   final def spliceAfter(stage: MidStage[O, O]): stage.type = {
