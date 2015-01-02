@@ -52,6 +52,8 @@ abstract class HubStage[I] extends TailStage[I] {
 
   private val nodeMap = new HashMap[Key, NodeHead]()
 
+  final protected def nodeCount(): Int = nodeMap.size()
+
   /** Make a new node and connect it to the hub if the key doesn't already exist
     * @param key key which identifies this node
     * @return the newly created node in an unstarted state. To begin the node

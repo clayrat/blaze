@@ -23,11 +23,14 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
                                        headerEncoder: HeaderEncoder[HType],
                                         node_builder: () => LeafBuilder[NodeMsg.Http2Msg[HType]],
                                              timeout: Duration,
+                                   maxInboundStreams: Int,
                                        inboundWindow: Int = DefaultSettings.INITIAL_WINDOW_SIZE)
   extends HubStage[ByteBuffer] with WriteSerializer[ByteBuffer]
 { hub =>
   import DefaultSettings._
   import SettingsKeys._
+  
+  require(maxInboundStreams > 0, "Invalid max streams")
 
   override def name: String = "Http2ServerHubStage"
 
@@ -47,10 +50,12 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   private val idManager = new StreamIdManager
   
   private var outbound_initial_window_size = INITIAL_WINDOW_SIZE
-  private var push_enable = ENABLE_PUSH              // initially enabled
-  private var max_streams = MAX_CONCURRENT_STREAMS   // initially unbounded. 0 with no active streams signals GOAWAY
+  private var push_enable = ENABLE_PUSH                      // initially enabled
+  private var max_outbound_streams = MAX_CONCURRENT_STREAMS  // initially unbounded.
   private var max_frame_size = MAX_FRAME_SIZE
-  private var max_header_size = MAX_HEADER_LIST_SIZE // initially unbounded
+  private var max_header_size = MAX_HEADER_LIST_SIZE         // initially unbounded
+
+  private var receivedGoAway = false
 
   /////////////////////////////////////////////////////////////////////////////////
 
@@ -66,7 +71,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   override protected def stageStartup() {
     super.stageStartup()
 
-    var settings = Vector.empty[Setting]
+    var settings = Vector.empty :+ Setting(SETTINGS_MAX_CONCURRENT_STREAMS, maxInboundStreams)
 
     if (inboundWindow != INITIAL_WINDOW_SIZE) {
       settings :+= Setting(SETTINGS_INITIAL_WINDOW_SIZE, inboundWindow)
@@ -151,7 +156,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   override protected def onNodeCommand(node: Node, cmd: OutboundCommand): Unit = lock.synchronized( cmd match {
     case Cmd.Disconnect =>
       removeNode(node)
-      if (max_streams == 0 && nodes().isEmpty) {  // we must be done
+      if (receivedGoAway && nodes().isEmpty) {  // we must be done
         stageShutdown()
         sendOutboundCommand(Cmd.Disconnect)
       }
@@ -181,6 +186,9 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       getNode(streamId) match {
         case None =>
           if (!idManager.checkClientId(streamId)) Error(PROTOCOL_ERROR(s"Invalid streamId", streamId))
+          else if (nodeCount() >= maxInboundStreams) {
+            Error(FLOW_CONTROL_ERROR(s"MAX_CONCURRENT_STREAMS setting exceeded: ${nodeCount()}"))
+          }
           else {
             val node = makeNode(streamId)
             node.startNode()
@@ -209,7 +217,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       }
 
       if (liveNodes) {    // No more streams allowed, but keep the connection going.
-        max_streams = 0
+        receivedGoAway = true
         Continue
       }
       else {
@@ -254,7 +262,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
           case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) =>
             if (v > Integer.MAX_VALUE) {
               Error(PROTOCOL_ERROR(s"To large MAX_CONCURRENT_STREAMS: $v"))
-            } else { max_streams = v.toInt; Continue }
+            } else { max_outbound_streams = v.toInt; Continue }
 
           case Setting(SETTINGS_INITIAL_WINDOW_SIZE, v) =>
             if (v > Integer.MAX_VALUE) Error(PROTOCOL_ERROR(s"Invalid initial window size: $v"))
@@ -285,11 +293,12 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
                            s"Stream ID: $streamId, flags: $flags, data: $data", streamId))
 
     override def onRstStreamFrame(streamId: Int, code: Int): Http2Result = {
+      val codeName = errorName(code)
       val node = removeNode(streamId)
       if (node.isEmpty) {
-        logger.warn(s"Client attempted to reset non-existent stream: $streamId, code: $code")
+        logger.warn(s"Client attempted to reset non-existent stream: $streamId, code: $codeName")
       }
-      else logger.info(s"Stream $streamId reset with code $code")
+      else logger.info(s"Stream $streamId reset with code $codeName")
       Continue
     }
 
