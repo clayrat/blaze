@@ -17,7 +17,7 @@ class ClientAuthSSLHttpServer(port: Int) {
     eng.setUseClientMode(false)
     eng.setNeedClientAuth(true)
 
-    TrunkBuilder(new SSLStage(eng, 100*1024)).cap(new ExampleHttpServerStage(None, 10*1024))
+    TrunkBuilder(new SSLStage(eng, 100*1024)).cap(ExampleHttpServerStage(None, 10*1024))
   }
 
   val group = AsynchronousChannelGroup.withFixedThreadPool(10, java.util.concurrent.Executors.defaultThreadFactory())

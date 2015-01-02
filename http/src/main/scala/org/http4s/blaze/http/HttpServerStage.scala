@@ -1,8 +1,9 @@
-package org.http4s.blaze.pipeline.stages.http
+package org.http4s.blaze.http
 
 
 import java.nio.charset.StandardCharsets
 
+import org.http4s.blaze.pipeline.Command.{OutboundCommand}
 import org.http4s.blaze.pipeline.{Command => Cmd, _}
 import org.http4s.blaze.util.Execution._
 import org.http4s.websocket.WebsocketBits.WebSocketFrame
@@ -16,25 +17,24 @@ import org.http4s.blaze.http.http_parser.Http1ServerParser
 import org.http4s.blaze.http.http_parser.BaseExceptions.BadRequest
 import org.http4s.blaze.http.websocket.WebSocketDecoder
 
+
 import java.util.Date
 import java.nio.ByteBuffer
 
 import org.http4s.blaze.util.BufferTools
 
-abstract class HttpServerStage(maxReqBody: Int) extends Http1ServerParser with TailStage[ByteBuffer] {
+class HttpServerStage(maxReqBody: Int)(handleRequest: HttpService) extends Http1ServerParser with TailStage[ByteBuffer] {
   import HttpServerStage.RouteResult._
 
   private implicit def ec = trampoline
 
-  val name = "HttpStage"
+  val name = "HTTP/1.1_Stage"
 
   private var uri: String = null
   private var method: String = null
   private var minor: Int = -1
   private var major: Int = -1
   private var headers = new ArrayBuffer[(String, String)]
-  
-  def handleRequest(method: String, uri: String, headers: Headers, body: ByteBuffer): Future[Response]
   
   /////////////////////////////////////////////////////////////////////////////////////////
 
@@ -44,23 +44,27 @@ abstract class HttpServerStage(maxReqBody: Int) extends Http1ServerParser with T
     requestLoop()
   }
 
-  private def requestLoop(): Unit = channelRead().onComplete {
-    case Success(buff)     => readLoop(buff)
-    case Failure(Cmd.EOF)  => sendOutboundCommand(Cmd.Disconnect)
-    case Failure(t)        =>
-      stageShutdown()
-      sendOutboundCommand(Cmd.Error(t))
+  private def requestLoop(): Unit = {
+    channelRead().onComplete {
+      case Success(buff) => readLoop(buff)
+      case Failure(t)  =>
+        println("Failure: " + t)
+        val command = t match {
+          case Cmd.EOF => println("Received EOF"); Cmd.Disconnect
+          case e       => Cmd.Error(t)
+        }
+
+        shutdownWithCommand(command)
+    }
   }
 
   private def readLoop(buff: ByteBuffer): Unit = {
     logger.trace {
       buff.mark()
-      val sb = new StringBuilder
-
-      while(buff.hasRemaining) sb.append(buff.get().toChar)
-
+      val msg = StandardCharsets.UTF_8.decode(buff)
       buff.reset()
-      s"RequestLoop received buffer $buff. Request:\n${sb.result}"
+
+      s"RequestLoop received buffer $buff. Request:\n$msg"
     }
 
     try {
@@ -75,17 +79,16 @@ abstract class HttpServerStage(maxReqBody: Int) extends Http1ServerParser with T
       }
 
       // TODO: need to check if we need a Host header or otherwise validate the request
-
       // we have enough to start the request
       gatherBody(buff, new ArrayBuffer[ByteBuffer]).onComplete {
         case Success(b) =>
           val hdrs = headers
           headers = new ArrayBuffer[(String, String)](hdrs.size + 10)
           runRequest(b, hdrs)
-        case Failure(t) => sendOutboundCommand(Cmd.Disconnect)
+        case Failure(t) => shutdownWithCommand(Cmd.Disconnect)
       }
     }
-    catch { case t: Throwable   => sendOutboundCommand(Cmd.Disconnect) }
+    catch { case t: Throwable   => shutdownWithCommand(Cmd.Disconnect) }
   }
 
   private def resetStage() {
@@ -99,24 +102,24 @@ abstract class HttpServerStage(maxReqBody: Int) extends Http1ServerParser with T
 
   private def runRequest(buffer: ByteBuffer, reqHeaders: Headers): Unit = {
     try handleRequest(method, uri, reqHeaders, buffer).flatMap {
-      case r: SimpleHttpResponse => handleHttpResponse(r, reqHeaders)
-      case WSResponse(stage) => handleWebSocket(reqHeaders, stage)
+      case r: SimpleHttpResponse    => handleHttpResponse(r, reqHeaders)
+      case WSResponse(stage)        => handleWebSocket(reqHeaders, stage)
     }.onComplete {       // See if we should restart the loop
       case Success(Reload)          => resetStage(); requestLoop()
-      case Success(Close)           => sendOutboundCommand(Cmd.Disconnect)
+      case Success(Close)           => shutdownWithCommand(Cmd.Disconnect)
       case Success(Upgrade)         => // NOOP don't need to do anything
       case Failure(t: BadRequest)   => badRequest(t)
-      case Failure(t)               => sendOutboundCommand(Cmd.Disconnect)
+      case Failure(t)               => shutdownWithCommand(Cmd.Error(t))
       case Success(other) =>
         logger.error("Shouldn't get here: " + other)
-        sendOutboundCommand(Cmd.Disconnect)
+        shutdownWithCommand(Cmd.Disconnect)
     }
     catch {
       case NonFatal(e) =>
         logger.error(e)("Error during `handleRequest` of HttpServerStage")
         val body = ByteBuffer.wrap("Internal Service Error".getBytes(StandardCharsets.ISO_8859_1))
         handleHttpResponse(SimpleHttpResponse("OK", 200, Nil, body), reqHeaders).onComplete { _ =>
-          sendOutboundCommand(Cmd.Disconnect)
+          shutdownWithCommand(Cmd.Error(e))
         }
     }
   }
@@ -174,7 +177,7 @@ abstract class HttpServerStage(maxReqBody: Int) extends Http1ServerParser with T
       .append(' ').append("Bad Request").append('\r').append('\n').append('\r').append('\n')
 
     channelWrite(ByteBuffer.wrap(sb.result().getBytes(StandardCharsets.ISO_8859_1)))
-      .onComplete(_ => sendOutboundCommand(Cmd.Disconnect))
+      .onComplete(_ => shutdownWithCommand(Cmd.Disconnect))
   }
 
   private def renderHeaders(sb: StringBuilder, headers: Traversable[(String, String)], length: Int) {
@@ -207,6 +210,11 @@ abstract class HttpServerStage(maxReqBody: Int) extends Http1ServerParser with T
       }
       Future.successful(total)
     }
+  }
+
+  private def shutdownWithCommand(cmd: OutboundCommand): Unit = {
+    stageShutdown()
+    sendOutboundCommand(cmd)
   }
 
   private def isKeepAlive(headers: Headers): Boolean = {

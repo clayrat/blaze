@@ -17,7 +17,7 @@ class Http2Server(port: Int) {
 
   val sslContext = ExampleKeystore.sslContext()
 
-  private def nodeBuilder(): LeafBuilder[Http2Meg] = LeafBuilder(new Http2Handler)
+  private def nodeBuilder(): LeafBuilder[Http2Meg] = LeafBuilder(Http2Handler())
 
   private val f: BufferPipelineBuilder = { _ =>
     val eng = sslContext.createSSLEngine()
