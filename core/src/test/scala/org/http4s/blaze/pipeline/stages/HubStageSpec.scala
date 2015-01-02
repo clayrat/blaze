@@ -28,9 +28,7 @@ class HubStageSpec extends Specification {
     override type Out = O
     override type Key = K
 
-    def makeNode(i: Key): Option[Node] = super.makeNode(i, null)
-
-    override protected def nodeBuilder(): LeafBuilder[Out] = f()
+    def makeNode(i: Key): Option[Node] = super.makeNode(i, f(), null)
 
     override protected def onNodeWrite(node: Node, data: Seq[Out]): Future[Unit] = ???
     override protected def onNodeRead(node: Node, size: Int): Future[Out] = ???

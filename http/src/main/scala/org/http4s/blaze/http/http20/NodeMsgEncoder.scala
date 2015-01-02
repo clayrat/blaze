@@ -10,39 +10,39 @@ private[http20] abstract class NodeMsgEncoder[HType](id: Int,
                                                fencoder: Http20FrameEncoder,
                                                hencoder: HeaderEncoder[HType]) {
 
-  import NodeMsg.{DataFrame, HeadersFrame, PushPromiseFrame}
+  import NodeMsg.{ DataFrame, HeadersFrame }
 
   private type Http2Msg = NodeMsg.Http2Msg[HType]
 
   protected def encodeMessages(maxPayloadSize: Int, maxWindow: Int, msgs: Seq[Http2Msg], acc: Buffer[ByteBuffer]): (Int, Seq[Http2Msg]) = {
 
     @tailrec
-    def go(msgs: Seq[Http2Msg], written: Int): (Int, Seq[Http2Msg]) = {
+    def go(msgs: Seq[Http2Msg], windowDiff: Int): (Int, Seq[Http2Msg]) = {
       if (msgs.nonEmpty) msgs.head match {
-        case d: DataFrame if written < maxWindow =>
+        case d: DataFrame if windowDiff < maxWindow =>
           val frameSz = d.data.remaining()
-          val wr = encodeDataFrame(maxPayloadSize, maxWindow - written, d, acc)
-          val totalWrite = wr + written
+          val frameWindow = encodeDataFrame(maxPayloadSize, maxWindow - windowDiff, d, acc)
+          val totalDiff = frameWindow + windowDiff
 
-          if (wr < frameSz) {
+          if (frameWindow < frameSz) {
             // only wrote a partial frame
-            assert(totalWrite == maxWindow)
-            (totalWrite, msgs)
+            assert(totalDiff == maxWindow)
+            (totalDiff, msgs)
           }
-          else go(msgs.tail, wr)
+          else go(msgs.tail, totalDiff)
 
-        case d: DataFrame => (written, msgs) // end of window
+        case d: DataFrame => (windowDiff, msgs) // end of window
 
         case hs: HeadersFrame[HType] =>
           encodeHeaders(maxPayloadSize, hs, acc)
-          go(msgs.tail, written)
+          go(msgs.tail, windowDiff)
 
-        case pp: PushPromiseFrame[HType] =>
-          encodePromiseFrame(maxPayloadSize, pp, acc)
-          go(msgs.tail, written)
+//        case pp: PushPromiseFrame[HType] =>
+//          encodePromiseFrame(maxPayloadSize, pp, acc)
+//          go(msgs.tail, windowDiff)
 
       }
-      else (written, Nil)
+      else (windowDiff, msgs)
     }
     go(msgs, 0)
   }
@@ -65,23 +65,23 @@ private[http20] abstract class NodeMsgEncoder[HType](id: Int,
     }
   }
 
-  /** Encode the PUSH_PROMISE frame, splitting the payload if required */
-  private def encodePromiseFrame(maxPayloadSize: Int, pp: PushPromiseFrame[HType], acc: Buffer[ByteBuffer]): Unit = {
-    val hsBuff = hencoder.encodeHeaders(pp.headers)
-
-    if (4 + hsBuff.remaining() <= maxPayloadSize) {
-      acc ++= fencoder.mkPushPromiseFrame(id, pp.promisedId, true, 0, hsBuff)
-    }
-    else {
-      // must split it
-      val l = hsBuff.limit()
-      hsBuff.limit(hsBuff.position() + maxPayloadSize - 4)
-      acc ++= fencoder.mkPushPromiseFrame(id, pp.promisedId, false, 0, hsBuff.slice())
-      // Add the rest of the continuation frames
-      hsBuff.limit(l)
-      mkContinuationFrames(maxPayloadSize, hsBuff, acc)
-    }
-  }
+//  /** Encode the PUSH_PROMISE frame, splitting the payload if required */
+//  private def encodePromiseFrame(maxPayloadSize: Int, pp: PushPromiseFrame[HType], acc: Buffer[ByteBuffer]): Unit = {
+//    val hsBuff = hencoder.encodeHeaders(pp.headers)
+//
+//    if (4 + hsBuff.remaining() <= maxPayloadSize) {
+//      acc ++= fencoder.mkPushPromiseFrame(id, pp.promisedId, true, 0, hsBuff)
+//    }
+//    else {
+//      // must split it
+//      val l = hsBuff.limit()
+//      hsBuff.limit(hsBuff.position() + maxPayloadSize - 4)
+//      acc ++= fencoder.mkPushPromiseFrame(id, pp.promisedId, false, 0, hsBuff.slice())
+//      // Add the rest of the continuation frames
+//      hsBuff.limit(l)
+//      mkContinuationFrames(maxPayloadSize, hsBuff, acc)
+//    }
+//  }
 
   // Split the remaining header data into CONTINUATION frames.
   @tailrec
@@ -101,14 +101,12 @@ private[http20] abstract class NodeMsgEncoder[HType](id: Int,
 
   /** Encodes as much of the DataFrame as allowed, but it may end unconsumed */
   private def encodeDataFrame(maxPayloadSize: Int, maxWindow: Int, frame: DataFrame, acc: Buffer[ByteBuffer]): Int = {
-
     val data = frame.data
     val frameSize = data.remaining()
-
-    var written = 0
+    var windowDiff = 0
 
     do {
-      val maxPayload = math.min(maxPayloadSize, maxWindow - written)
+      val maxPayload = math.min(maxPayloadSize, maxWindow - windowDiff)
       val sz = data.remaining()
 
       if (sz > maxPayload) { // can write a partial frame
@@ -117,16 +115,16 @@ private[http20] abstract class NodeMsgEncoder[HType](id: Int,
         data.limit(end)
         acc ++= fencoder.mkDataFrame(data.slice(), id, false, 0)
         data.limit(l).position(end)
-        written += maxPayload
+        windowDiff += maxPayload
       }
       else {
         acc ++= fencoder.mkDataFrame(data, id, frame.isLast, 0)
-        written += sz
+        windowDiff += sz
       }
 
-    } while (written < maxWindow && written < frameSize)
+    } while (windowDiff < maxWindow && windowDiff < frameSize)
 
-    written
+    windowDiff
   }
 }
 

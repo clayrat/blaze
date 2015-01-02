@@ -11,7 +11,7 @@ object NodeMsg {
 
   case class HeadersFrame[HType](priority: Option[Priority], end_stream: Boolean, headers: HType) extends Http2Msg[HType]
 
-  case class PushPromiseFrame[HType](promisedId: Int, headers: HType) extends Http2Msg[HType]
+//  case class PushPromiseFrame[HType](promisedId: Int, headers: HType) extends Http2Msg[HType]
 
   // For handling unknown stream frames
 //  case class ExtensionFrame(tpe: Int, flags: Byte, data: ByteBuffer) extends Http2Msg[Nothing]

@@ -47,10 +47,10 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   private val idManager = new StreamIdManager
   
   private var outbound_initial_window_size = INITIAL_WINDOW_SIZE
-  private var push_enable = ENABLE_PUSH                    // initially enabled
-  private var max_streams = MAX_CONCURRENT_STREAMS         // initially unbounded
+  private var push_enable = ENABLE_PUSH              // initially enabled
+  private var max_streams = MAX_CONCURRENT_STREAMS   // initially unbounded. 0 with no active streams signals GOAWAY
   private var max_frame_size = MAX_FRAME_SIZE
-  private var max_header_size = MAX_HEADER_LIST_SIZE       // initially unbounded
+  private var max_header_size = MAX_HEADER_LIST_SIZE // initially unbounded
 
   /////////////////////////////////////////////////////////////////////////////////
 
@@ -59,7 +59,8 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
     override protected val headerEncoder = hub.headerEncoder
   }
 
-  override protected def nodeBuilder(): LeafBuilder[Out] = node_builder()
+  private def makeNode(id: Int): Node = super.makeNode(id, node_builder(), FlowControl.newNodeState(id))
+    .getOrElse(sys.error(s"Attempted to make stream that already exists"))
 
   // Startup
   override protected def stageStartup() {
@@ -143,20 +144,21 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
   /** called when a node needs more data */
   override protected def onNodeRead(node: Node, size: Int): Future[Http2Msg] = lock.synchronized {
-    node.attachment.onNodeRead()
+    node.attachment.onNodeReadRequest()
   }
 
   /** called when a node sends an outbound command */
   override protected def onNodeCommand(node: Node, cmd: OutboundCommand): Unit = lock.synchronized( cmd match {
-    case Cmd.Disconnect => removeNode(node)
+    case Cmd.Disconnect =>
+      removeNode(node)
+      if (max_streams == 0 && nodes().isEmpty) {  // we must be done
+        stageShutdown()
+        sendOutboundCommand(Cmd.Disconnect)
+      }
+
     case e@Cmd.Error(t) => logger.error(t)(s"Received error from node ${node.key}"); sendOutboundCommand(e)
     case cmd            => logger.warn(s"$name is ignoring unhandled command ($cmd) from $node.")  // Flush, Connect...
   })
-
-  // Shortcut
-  private def makeNode(id: Int): Node = super.makeNode(id, FlowControl.newNode(id))
-                                             .getOrElse(sys.error(s"Attempted to make stream that already exists"))
-
 
   ///////////////////////// The FrameHandler decides how to decode incoming frames ///////////////////////
   
@@ -190,16 +192,30 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
     }
 
     override def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): Http2Result = {
+
       val errStr = UTF_8.decode(debugData).toString()
       if (errorCode == NO_ERROR.code) {
         logger.warn(s"Received GOAWAY(NO_ERROR) frame, msg: '$errStr'")
+      }
+      else {
+        logger.warn(s"Received error ${Http2Exception.get(errorCode.toInt)}, msg: $errStr")
+      }
+
+      var liveNodes = false
+
+      nodes().foreach { node =>
+        if (node.key > lastStream) removeNode(node)
+        else liveNodes = true
+      }
+
+      if (liveNodes) {    // No more streams allowed, but keep the connection going.
+        max_streams = 0
+        Continue
+      }
+      else {
         sendOutboundCommand(Cmd.Disconnect)
         stageShutdown()
         Halt
-      }
-      else {
-        logger.warn(s"Received error code $errorCode, msg: $errStr")
-        ???
       }
     }
 
@@ -330,17 +346,18 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   /////////////////////////////////////////////////////////////////////////////////////////////
 
   protected object FlowControl {
+    
     private var outboundConnectionWindow = outbound_initial_window_size
     private var inboundConnectionWindow = inboundWindow
 
-    def newNode(id: Int): NodeState = new NodeState(id, outbound_initial_window_size)
+    def newNodeState(id: Int): NodeState = new NodeState(id, outbound_initial_window_size)
 
     def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): Unit = {
       if (streamId == 0) {
         outboundConnectionWindow += sizeIncrement
 
         // Allow all the nodes to attempt to write if they want to
-        nodeIterator().forall { node =>
+        nodes().forall { node =>
           node.attachment.incrementOutboundWindow(0)
           outboundConnectionWindow > 0
         }
@@ -354,9 +371,9 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       val diff = newWindow - outbound_initial_window_size
       logger.trace(s"Adjusting outbound windows by $diff")
       outbound_initial_window_size = newWindow
-
       outboundConnectionWindow += diff
-      nodeIterator().foreach { node =>
+
+      nodes().foreach { node =>
         node.attachment.incrementOutboundWindow(diff)
       }
     }
@@ -366,22 +383,19 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
     class NodeState private[FlowControl](id: Int, private var outboundWindow: Int)
         extends NodeMsgEncoder[HType](id, codec, headerEncoder)
     {
-
       private var streamInboundWindow: Int = inboundWindow
 
-      private val pendingInboundMessages = new util.ArrayDeque[Http2Msg](16)
-      private var pendingInboundPromise: Promise[Http2Msg] = null
-      def hasPendingInboundData(): Boolean = !pendingInboundMessages.isEmpty
-
       private var pendingOutboundFrames: (Promise[Unit], Seq[Http2Msg]) = null
-      def hasPendingOutboundMsgs(): Boolean = pendingOutboundFrames != null
+
+      private var pendingInboundPromise: Promise[Http2Msg] = null
+      private val pendingInboundMessages = new util.ArrayDeque[Http2Msg](16)
       
       def writeMessages(msgs: Seq[Http2Msg]): Future[Unit] = {
         if (pendingOutboundFrames != null) {
           Future.failed(new IndexOutOfBoundsException("Cannot have more than one pending write request"))
         }
         else {
-          val acc = new ArrayBuffer[ByteBuffer]
+          val acc = new ArrayBuffer[ByteBuffer]()
           val rem = encodeMessages(msgs, acc)
           val f = channelWrite(acc, timeout)
           if (rem.isEmpty) f
@@ -393,7 +407,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         }
       }
 
-      def onNodeRead(): Future[Http2Msg] = {
+      def onNodeReadRequest(): Future[Http2Msg] = {
         if (pendingInboundPromise != null) {
           Future.failed(new IndexOutOfBoundsException("Cannot have more than one pending read request"))
         } else {

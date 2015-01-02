@@ -97,11 +97,17 @@ package object http20 {
       if (ex.code == code) Some(( ex.msg, ex.stream))
       else None
     }
+
+    override val toString: String = s"$name($code)"
+  }
+
+  object Http2Exception {
+    def get(id: Int): String =
+      exceptionsMap.get(id).map(_.name).getOrElse(s"UNKNOWN_ERROR(${Integer.toHexString(id)}")
   }
 
   final case class Http2Exception(val code: Int, val name: String)(val msg: String, val stream: Option[Int])
-        extends Exception(msg)
-  {
+        extends Exception(msg) {
     def msgBuffer(): ByteBuffer = {
       val bytes = msg.getBytes(US_ASCII)
       ByteBuffer.wrap(bytes)

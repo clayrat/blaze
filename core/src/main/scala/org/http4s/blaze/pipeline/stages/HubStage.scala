@@ -6,6 +6,7 @@ package stages
 import java.util.HashMap
 import java.nio.channels.NotYetConnectedException
 
+import scala.collection.mutable
 import scala.concurrent.Future
 
 import org.http4s.blaze.pipeline.Command._
@@ -47,10 +48,6 @@ abstract class HubStage[I] extends TailStage[I] {
     * it can change any related state it may have */
   protected def onNodeCommand(node: Node, cmd: OutboundCommand): Unit
 
-  /** Constructs a new LeafBuilder[Out] to make nodes from */
-  protected def nodeBuilder(): LeafBuilder[Out]
-  
-
   ////////////////////////////////////////////////////////////////////////////////////
 
   private val nodeMap = new HashMap[Key, NodeHead]()
@@ -60,11 +57,11 @@ abstract class HubStage[I] extends TailStage[I] {
     * @return the newly created node in an unstarted state. To begin the node
     *         send a [[Connected]] command or call its `startNode()` method
     */
-  protected def makeNode(key: Key, attachment: => Attachment): Option[Node] = {
+  protected def makeNode(key: Key, builder: LeafBuilder[Out], attachment: => Attachment): Option[Node] = {
     if (!nodeMap.containsKey(key)) {
       val node = new NodeHead(key, attachment)
       nodeMap.put(key, node)
-      nodeBuilder().base(node)
+      builder.base(node)
       Some(node)
     }
     else None
@@ -77,12 +74,8 @@ abstract class HubStage[I] extends TailStage[I] {
   final protected def getNode(key: Key): Option[Node] = Option(nodeMap.get(key))
 
   /** Get an iterator over the nodes attached to this [[HubStage]] */
-  final protected def nodeIterator(): Iterator[Node] = new Iterator[Node] {
-    private val it = nodeMap.values().iterator()
-
-    override def hasNext: Boolean = it.hasNext
-    override def next(): Node = it.next()
-  }
+  final protected def nodes(): Seq[Node] =
+    mutable.WrappedArray.make(nodeMap.values().toArray)
 
   /** Closes all the nodes of this hub stage */
   protected def closeAllNodes(): Unit = {
