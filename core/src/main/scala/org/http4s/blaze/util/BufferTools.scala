@@ -93,6 +93,19 @@ object BufferTools {
     checkEmpty(buffers.length - 1)
   }
 
+  /** Replaces empty buffers with the `emptyBuffer` to allow GC of depleted
+    * ByteBuffers and returns the index of the first non-empty ByteBuffer, or
+    * the last index if they are all empty. */
+  def dropEmpty(buffers: Array[ByteBuffer]): Int = {
+    val max = buffers.length - 1
+    var first = 0
+    while(first < max && !buffers(first).hasRemaining()) {
+      buffers(first) = emptyBuffer
+      first += 1
+    }
+    first
+  }
+
   /** Check the array of buffers to ensure they are all empty
     *
     * @param buffers `ByteBuffer`s to check for data

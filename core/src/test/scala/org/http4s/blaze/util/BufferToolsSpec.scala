@@ -74,6 +74,15 @@ class BufferToolsSpec extends Specification {
       checkEmpty(Array[ByteBuffer]()) must_== true
       checkEmpty(Seq()) must_== true
     }
+
+    "Find index of first Non-empty buffer" in {
+      dropEmpty(Array(allocate(1))) must_== 0
+      dropEmpty(Array(allocate(0))) must_== 0
+      dropEmpty(Array(allocate(1), allocate(2))) must_== 0
+      dropEmpty(Array(allocate(0), allocate(2))) must_== 1
+      dropEmpty(Array(allocate(0), allocate(0))) must_== 1
+      dropEmpty(Array(allocate(1), allocate(0))) must_== 0
+    }
   }
 
 }
