@@ -24,7 +24,7 @@ import java.nio.ByteBuffer
 import org.http4s.blaze.util.BufferTools
 
 class HttpServerStage(maxReqBody: Int)(handleRequest: HttpService) extends Http1ServerParser with TailStage[ByteBuffer] {
-  import HttpServerStage.RouteResult._
+  import HttpServerStage._
 
   private implicit def ec = trampoline
 
@@ -46,26 +46,20 @@ class HttpServerStage(maxReqBody: Int)(handleRequest: HttpService) extends Http1
 
   private def requestLoop(): Unit = {
     channelRead().onComplete {
-      case Success(buff) => readLoop(buff)
-      case Failure(t)  =>
-        println("Failure: " + t)
-        val command = t match {
-          case Cmd.EOF => println("Received EOF"); Cmd.Disconnect
-          case e       => Cmd.Error(t)
-        }
-
-        shutdownWithCommand(command)
+      case Success(buff)    => readLoop(buff)
+      case Failure(Cmd.EOF) => // NOOP
+      case Failure(t)       => shutdownWithCommand(Cmd.Error(t))
     }
   }
 
   private def readLoop(buff: ByteBuffer): Unit = {
-    logger.trace {
-      buff.mark()
-      val msg = StandardCharsets.UTF_8.decode(buff)
-      buff.reset()
-
-      s"RequestLoop received buffer $buff. Request:\n$msg"
-    }
+//    logger.trace {
+//      buff.mark()
+//      val msg = StandardCharsets.UTF_8.decode(buff)
+//      buff.reset()
+//
+//      s"RequestLoop received buffer $buff. Request:\n$msg"
+//    }
 
     try {
       if (!requestLineComplete() && !parseRequestLine(buff)) {
@@ -85,7 +79,9 @@ class HttpServerStage(maxReqBody: Int)(handleRequest: HttpService) extends Http1
           val hdrs = headers
           headers = new ArrayBuffer[(String, String)](hdrs.size + 10)
           runRequest(b, hdrs)
-        case Failure(t) => shutdownWithCommand(Cmd.Disconnect)
+
+        case Failure(Cmd.EOF) => // NOOP
+        case Failure(t)       => shutdownWithCommand(Cmd.Error(t))
       }
     }
     catch { case t: Throwable   => shutdownWithCommand(Cmd.Disconnect) }
@@ -110,15 +106,14 @@ class HttpServerStage(maxReqBody: Int)(handleRequest: HttpService) extends Http1
       case Success(Upgrade)         => // NOOP don't need to do anything
       case Failure(t: BadRequest)   => badRequest(t)
       case Failure(t)               => shutdownWithCommand(Cmd.Error(t))
-      case Success(other) =>
-        logger.error("Shouldn't get here: " + other)
-        shutdownWithCommand(Cmd.Disconnect)
     }
     catch {
       case NonFatal(e) =>
         logger.error(e)("Error during `handleRequest` of HttpServerStage")
         val body = ByteBuffer.wrap("Internal Service Error".getBytes(StandardCharsets.ISO_8859_1))
-        handleHttpResponse(SimpleHttpResponse("OK", 200, Nil, body), reqHeaders).onComplete { _ =>
+        val resp = SimpleHttpResponse("OK", 200, Nil, body)
+
+        handleHttpResponse(resp, reqHeaders).onComplete { _ =>
           shutdownWithCommand(Cmd.Error(e))
         }
     }
@@ -170,17 +165,17 @@ class HttpServerStage(maxReqBody: Int)(handleRequest: HttpService) extends Http1
     }
   }
 
-  private def badRequest(msg: BadRequest) {
+  private def badRequest(msg: BadRequest): Unit = {
     val sb = new StringBuilder(512)
     sb.append("HTTP/").append(1).append('.')
       .append(minor).append(' ').append(400)
-      .append(' ').append("Bad Request").append('\r').append('\n').append('\r').append('\n')
+      .append(" Bad Request\r\n\r\n")
 
     channelWrite(ByteBuffer.wrap(sb.result().getBytes(StandardCharsets.ISO_8859_1)))
       .onComplete(_ => shutdownWithCommand(Cmd.Disconnect))
   }
 
-  private def renderHeaders(sb: StringBuilder, headers: Traversable[(String, String)], length: Int) {
+  private def renderHeaders(sb: StringBuilder, headers: Seq[(String, String)], length: Int) {
     headers.foreach { case (k, v) =>
       // We are not allowing chunked responses at the moment, strip our Chunked-Encoding headers
       if (!k.equalsIgnoreCase("Transfer-Encoding") && !k.equalsIgnoreCase("Content-Length")) {
@@ -239,7 +234,6 @@ class HttpServerStage(maxReqBody: Int)(handleRequest: HttpService) extends Http1
   }
 
   protected def headerComplete(name: String, value: String): Boolean = {
-    logger.trace(s"Received header '$name: $value'")
     headers += ((name, value))
     false
   }
@@ -249,9 +243,6 @@ class HttpServerStage(maxReqBody: Int)(handleRequest: HttpService) extends Http1
                                   scheme: String,
                                   majorversion: Int,
                                   minorversion: Int): Boolean = {
-
-    logger.trace(s"Received request($methodString $uri $scheme/$majorversion.$minorversion)")
-
     this.uri = uri
     this.method = methodString
     this.major = majorversion
@@ -261,9 +252,8 @@ class HttpServerStage(maxReqBody: Int)(handleRequest: HttpService) extends Http1
 }
 
 private object HttpServerStage {
-
-  object RouteResult extends Enumeration {
-    type RouteResult = Value
-    val Reload, Close, Upgrade = Value
-  }
+  sealed trait RouteResult
+  case object Reload  extends RouteResult
+  case object Close   extends RouteResult
+  case object Upgrade extends RouteResult
 }
