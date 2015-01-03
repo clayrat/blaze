@@ -16,6 +16,6 @@ object Http20Hub {
     new SeqTupleHeaderEncoder(),
     builder,
     timeout,
-    maxHeaders
+    300   // max inbound streams
   )
 }

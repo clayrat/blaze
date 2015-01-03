@@ -129,13 +129,14 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         logger.trace("Decoded buffer. Result: " + r)
         r match {
           case Continue => go()
-          case Halt => // NOOP TODO: are we ever using `Halt`?
-          case Error(t) => onFailure(t, "readLoop Error result")
           case BufferUnderflow =>
             channelRead().onComplete {
               case Success(b2) => readLoop(BufferTools.concatBuffers(buff, b2))
               case Failure(t) => onFailure(t, "ReadLoop")
             }
+
+          case Halt => // NOOP
+          case Error(t) => onFailure(t, "readLoop Error result")
         }
       }
 
@@ -185,7 +186,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
       getNode(streamId) match {
         case None =>
-          if (!idManager.checkClientId(streamId)) Error(PROTOCOL_ERROR(s"Invalid streamId", streamId))
+          if (!idManager.validateClientId(streamId)) Error(PROTOCOL_ERROR(s"Invalid streamId", streamId))
           else if (nodeCount() >= maxInboundStreams) {
             Error(FLOW_CONTROL_ERROR(s"MAX_CONCURRENT_STREAMS setting exceeded: ${nodeCount()}"))
           }
@@ -202,7 +203,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
     override def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): Http2Result = {
 
       val errStr = UTF_8.decode(debugData).toString()
-      if (errorCode == NO_ERROR.code) {
+      if (errorCode != NO_ERROR.code) {
         logger.warn(s"Received GOAWAY(NO_ERROR) frame, msg: '$errStr'")
       }
       else {
@@ -309,7 +310,9 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
           node.attachment.inboundMessage(msg, flowSize)
           Continue
 
-        case None => Continue  // NOOP // TODO: should this be a stream error?
+        case None =>
+          if (streamId <= idManager.lastClientId()) Continue // NOOP, might be old stream
+          else Error(PROTOCOL_ERROR(s"DATA frame on invalid stream: $streamId"))
       }
     }
 
@@ -448,7 +451,6 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         // track the bytes written and write the buffers
         outboundWindow -= bytes
         outboundConnectionWindow -= bytes
-
         rem
       }
 

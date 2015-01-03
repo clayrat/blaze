@@ -77,11 +77,29 @@ class BufferToolsSpec extends Specification {
 
     "Find index of first Non-empty buffer" in {
       dropEmpty(Array(allocate(1))) must_== 0
-      dropEmpty(Array(allocate(0))) must_== 0
-      dropEmpty(Array(allocate(1), allocate(2))) must_== 0
-      dropEmpty(Array(allocate(0), allocate(2))) must_== 1
-      dropEmpty(Array(allocate(0), allocate(0))) must_== 1
-      dropEmpty(Array(allocate(1), allocate(0))) must_== 0
+      val arr1 = Array(allocate(0))
+      dropEmpty(arr1) must_== 0
+      arr1(0) must_== emptyBuffer
+
+      val arr2 = Array(allocate(1), allocate(2))
+      dropEmpty(arr2) must_== 0
+      arr2(0) must_!= emptyBuffer
+      arr2(1) must_!= emptyBuffer
+
+      val arr3 = Array(allocate(0), allocate(2))
+      dropEmpty(arr3) must_== 1
+      arr3(0) must_== emptyBuffer
+      arr3(1) must_!= emptyBuffer
+
+      val arr4 = Array(allocate(0), allocate(0))
+      dropEmpty(arr4) must_== 1
+      arr4(0) must_== emptyBuffer
+      arr4(1) must_== emptyBuffer
+
+      val arr5 = Array(allocate(1), allocate(0))
+      dropEmpty(arr5) must_== 0
+      arr2(0) must_!= emptyBuffer
+      arr2(1) must_!= emptyBuffer
     }
   }
 

@@ -5,7 +5,7 @@ class StreamIdManager {
   private var _nextServerId: Int = 2
 
   /** Determine if the client ID is valid based on the stream history */
-  def checkClientId(id: Int): Boolean = {
+  def validateClientId(id: Int): Boolean = {
     if (id > _lastClientId && id % 2 == 1) {
       _lastClientId = id
       true

@@ -16,13 +16,27 @@ object Http2Handler {
   def apply(timeout: Duration = Duration.Inf, ec: ExecutionContext = trampoline): BasicHttpStage =
     new BasicHttpStage(timeout, ec, service)
 
-  private val tail = (0 to 1024*1024).mkString("\n", "\n", "")
+  private val bigstring = (0 to 1024*1024*2).mkString("\n", "\n", "")
 
   private def service(method: Method, uri: Uri, hs: Headers, body: ByteBuffer): Future[Response] = {
 
-    val body = hs.map { case (k, v) => "[\"" + k + "\", \"" + v + "\"]" }
-                 .mkString("Headers\n", "\n", tail)
+    val resp = uri match {
+      case "/bigstring" =>
+        SimpleHttpResponse.Ok(bigstring.getBytes(), ("content-type", "application/binary")::Nil)
 
-    Future.successful(SimpleHttpResponse.Ok(body))
+      case uri =>
+        val sb = new StringBuilder
+        sb.append("Path: ").append(uri).append("\nHeaders\n")
+        hs.map { case (k, v) => "[\"" + k + "\", \"" + v + "\"]\n" }
+          .addString(sb)
+
+        val body = sb.result()
+
+        SimpleHttpResponse.Ok(body)
+    }
+
+    Future.successful(resp)
   }
+
+
 }

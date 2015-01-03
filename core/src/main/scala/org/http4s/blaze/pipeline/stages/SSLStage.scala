@@ -184,7 +184,7 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
     catch {
       case t: SSLException =>
         logger.warn(t)("SSLException during read loop")
-        Future.failed(t)
+        p.tryFailure(t)
 
       case t: Throwable =>
         logger.warn(t)("Error in SSL read loop")
@@ -270,7 +270,7 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
     catch {
       case t: SSLException =>
         logger.warn(t)("SSLException during writeLoop")
-        Future.failed(t)
+        p.tryFailure(t)
 
       case t: Throwable =>
         logger.error(t)("Error in SSL writeLoop")

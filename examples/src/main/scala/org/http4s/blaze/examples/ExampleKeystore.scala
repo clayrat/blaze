@@ -18,7 +18,7 @@ object ExampleKeystore {
     val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
     kmf.init(ks, BogusKeystore.getCertificatePassword)
 
-    val context = SSLContext.getInstance("TLSv1.2")
+    val context = SSLContext.getInstance("TLS")
 
 
     context.init(kmf.getKeyManagers(), null, null)
