@@ -13,7 +13,7 @@ class NIO1HttpServer(port: Int) {
 
   private val status = new IntervalConnectionMonitor(2.seconds)
   private val f: BufferPipelineBuilder =
-    status.wrapBuilder { _ => LeafBuilder(ExampleHttpServerStage(Some(status), 10*1024)) }
+    status.wrapBuilder { _ => LeafBuilder(ExampleService.http1Stage(Some(status), 10*1024)) }
 
   private val factory = new NIO1SocketServerChannelFactory(f, workerThreads = 6)
 
