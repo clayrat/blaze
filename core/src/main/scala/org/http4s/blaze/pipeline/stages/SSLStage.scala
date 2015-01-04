@@ -156,7 +156,7 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
 
               if (out.nonEmpty) p.success(joinBuffers(out))          // We got some data so send it
               else {
-                val readsize = if (size > 0) size - bytesRead else size
+                val readsize = if (size > 0) size - newRead else size
                 channelRead(math.max(readsize, maxNetSize)).onComplete {
                   case Success(b) => readLoop(b, readsize, out, p)
                   case Failure(f) => p.tryFailure(f)
@@ -173,8 +173,8 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
           }
 
         case _ => // must be handshaking.
-          sslHandshake(buffer, r.getHandshakeStatus).onComplete {
-            case Success(data) => readLoop(b, size - bytesRead, out, p)
+          sslHandshake(b, r.getHandshakeStatus).onComplete {
+            case Success(b)    => readLoop(b, size - bytesRead, out, p)
             case f@ Failure(_) => p.tryComplete(f)
           }(trampoline)
       }
