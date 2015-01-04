@@ -101,7 +101,7 @@ sealed trait Tail[I] extends Stage {
   }
 
   final def channelWrite(data: Seq[I], timeout: Duration): Future[Unit] = {
-    val f = _prevStage.writeRequest(data)
+    val f = channelWrite(data)
     checkTimeout(timeout, f)
   }
 
