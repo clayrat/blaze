@@ -1,8 +1,8 @@
 package org.http4s.blaze.examples
 
-import org.http4s.blaze.channel._
-
 import java.net.InetSocketAddress
+
+import org.http4s.blaze.channel._
 import org.http4s.blaze.channel.nio1.NIO1SocketServerChannelFactory
 import org.http4s.blaze.pipeline.LeafBuilder
 import org.http4s.blaze.pipeline.stages.monitors.IntervalConnectionMonitor
