@@ -8,12 +8,12 @@ import javax.net.ssl.{SSLException, SSLEngine}
 import scala.annotation.tailrec
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.{Promise, Future}
-import scala.util.{Try, Failure, Success}
+import scala.util.{Failure, Success}
 
 import org.http4s.blaze.pipeline.MidStage
 import org.http4s.blaze.pipeline.Command.EOF
 import org.http4s.blaze.util.Execution._
-import org.http4s.blaze.util.ScratchBuffer
+import org.http4s.blaze.util.{BufferTools, ScratchBuffer}
 import org.http4s.blaze.util.BufferTools._
 
 
@@ -21,35 +21,73 @@ import org.http4s.blaze.util.BufferTools._
 final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidStage[ByteBuffer, ByteBuffer] {
   import SSLStage._
 
-  def name: String = s"SSLStage"
+  def name: String = "SSLStage"
 
   private val maxNetSize = engine.getSession.getPacketBufferSize
-
   private val maxBuffer = math.max(maxNetSize, engine.getSession.getApplicationBufferSize)
 
-  @volatile
+  ///////////// State maintained by the SSLStage //////////////////////
+  private val handshakeQueue = new ListBuffer[DelayedOp]  // serves as our Lock object
   private var readLeftover: ByteBuffer = null
+  private def inHandshake() = handshakeQueue.nonEmpty
+  /////////////////////////////////////////////////////////////////////
 
-  def readRequest(size: Int): Future[ByteBuffer] = {
+  private sealed trait DelayedOp
+  private case class ReadOp(size: Int, p: Promise[ByteBuffer]) extends DelayedOp
+  private case class WriteOp(data: Array[ByteBuffer], p: Promise[Unit]) extends DelayedOp
+
+
+  override def writeRequest(data: Seq[ByteBuffer]): Future[Unit] =
+    doWrite(data.toArray, Promise[Unit])
+
+  override def writeRequest(data: ByteBuffer): Future[Unit] =
+    doWrite(Array(data), Promise[Unit])
+
+  override def readRequest(size: Int): Future[ByteBuffer] = {
     val p = Promise[ByteBuffer]
-
-    channelRead(size).onComplete {
-      case Success(b) => readLoop(b, size, new ListBuffer[ByteBuffer], p)
-      case f: Failure[_] => p.tryComplete(f.asInstanceOf[Failure[ByteBuffer]])
-    }(directec)
+    doRead(size, p)
     p.future
   }
 
-  override def writeRequest(data: Seq[ByteBuffer]): Future[Unit] = {
-    val p = Promise[Unit]
-    writeLoop(data.toArray, new ListBuffer, p)
+  /////////////////////////////////////////////////////////////////////////
+
+  // MUST be called inside synchronized blocks
+  private def getQueuedBytes(): ByteBuffer = {
+    if (readLeftover != null) {
+      val b = readLeftover
+      readLeftover = null
+      b
+    } else emptyBuffer
+  }
+
+  private def doRead(size: Int, p: Promise[ByteBuffer]): Unit = handshakeQueue.synchronized {
+    if (inHandshake()) handshakeQueue += ReadOp(size, p)
+    else readLoop(getQueuedBytes(), size, new ListBuffer, p)
+  }
+
+  // Does a channel read, then starts the read
+  private def getBufferRead(size: Int, p: Promise[ByteBuffer]): Unit = channelRead(size).onComplete {
+    case Success(buff) => handshakeQueue.synchronized {
+        readLeftover = BufferTools.concatBuffers(readLeftover, buff)
+        doRead(size, p)
+      }
+    case Failure(t) => p.tryFailure(t)
+  }(trampoline)
+
+  private def doWrite(data: Array[ByteBuffer], p: Promise[Unit]): Future[Unit] = handshakeQueue.synchronized {
+    if (inHandshake()) handshakeQueue += WriteOp(data, p)
+    else writeLoop(data, new ListBuffer, p)
+
     p.future
   }
 
-  override def writeRequest(data: ByteBuffer): Future[Unit] = {
-    val p = Promise[Unit]
-    writeLoop(Array(data), new ListBuffer, p)
-    p.future
+  // cleans up any pending requests
+  private def handshakeFailure(t: Throwable): Unit = handshakeQueue.synchronized {
+    val results = handshakeQueue.result(); handshakeQueue.clear();
+    results.foreach {
+      case ReadOp(_, p) => p.tryFailure(t)
+      case WriteOp(_, p) => p.tryFailure(t)
+    }
   }
 
   /** Perform the SSL Handshake
@@ -59,7 +97,7 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
     * @param data inbound ByteBuffer. Should be empty for write based handshakes.
     * @return any leftover inbound data.
     */
-  private def sslHandshake(data: ByteBuffer, r: HandshakeStatus): Future[ByteBuffer] = {
+  private def sslHandshake(data: ByteBuffer, r: HandshakeStatus): Unit = handshakeQueue.synchronized {
     r match {
       case HandshakeStatus.NEED_UNWRAP =>
         try {
@@ -67,34 +105,37 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
           val r = engine.unwrap(data, o)
 
           if (r.getStatus == Status.BUFFER_UNDERFLOW) {
-            channelRead().flatMap { b =>
-              val sum = concatBuffers(data, b)
-              sslHandshake(sum, r.getHandshakeStatus)
+            channelRead().onComplete {
+              case Success(b) =>
+                val sum = concatBuffers(data, b)
+                sslHandshake(sum, r.getHandshakeStatus)
+
+              case Failure(t) => handshakeFailure(t)
             }(trampoline)
           }
           else sslHandshake(data, r.getHandshakeStatus)
         } catch {
           case t: SSLException =>
             logger.warn(t)("SSLException in SSL handshake")
-            Future.failed(t)
+            handshakeFailure(t)
 
           case t: Throwable =>
             logger.error(t)("Error in SSL handshake. HandshakeStatus coming in: " + r)
-            Future.failed(t)
+            handshakeFailure(t)
         }
 
-      case HandshakeStatus.NEED_TASK => // TODO: do we want to unwrap here? What of the data?
+      case HandshakeStatus.NEED_TASK =>
         try {
           runTasks()
           sslHandshake(data, engine.getHandshakeStatus)
         } catch {
           case t: SSLException =>
             logger.warn(t)("SSLException in SSL handshake while running tasks")
-            Future.failed(t)
+            handshakeFailure(t)
 
           case t: Throwable =>
             logger.error(t)("Error running handshake tasks")
-            Future.failed(t)
+            handshakeFailure(t)
         }
 
       case HandshakeStatus.NEED_WRAP =>
@@ -105,8 +146,11 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
 
           if (r.bytesProduced() < 1) logger.warn(s"SSL Handshake WRAP produced 0 bytes.\n$r")
 
-          channelWrite(copyBuffer(o))
-            .flatMap { _ => sslHandshake(data, r.getHandshakeStatus) }(trampoline)
+          channelWrite(copyBuffer(o)).onComplete {
+            case Success(_) => sslHandshake(data, r.getHandshakeStatus)
+            case Failure(t) => handshakeFailure(t)
+          }(trampoline)
+
         } catch {
           case t: SSLException =>
             logger.warn(t)("SSLException during handshake")
@@ -117,70 +161,73 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
             Future.failed(t)
         }
 
-      case _ => Future.successful(data)
+      case _ =>
+        assert(readLeftover == null)
+        readLeftover = data
+        val ops = handshakeQueue.result(); handshakeQueue.clear()
+        logger.trace(s"Submitting backed up ops: $ops")
+        ops.foreach {
+          case ReadOp(sz, p) => doRead(sz, p)
+          case WriteOp(d, p) => doWrite(d, p)
+        }
     }
   }
 
   // If we have at least one output buffer, we won't read more data until another request is made
-  private def readLoop(buffer: ByteBuffer, size: Int, out: ListBuffer[ByteBuffer], p: Promise[ByteBuffer]): Unit = {
-    // Consolidate buffers if they exist
-    val b = concatBuffers(readLeftover, buffer)
-    readLeftover = null
+  private def readLoop(b: ByteBuffer, size: Int, out: ListBuffer[ByteBuffer], p: Promise[ByteBuffer]): Unit = {
 
-    val o = getScratchBuffer(maxBuffer)
+    val scratch = getScratchBuffer(maxBuffer)
 
     @tailrec
-    def goRead(bytesRead: Int): Unit = {
-      val r = engine.unwrap(b, o)
+    def goRead(): Unit = {
+      val r = engine.unwrap(b, scratch)
+      logger.debug(s"SSL Read Request Status: $r, $scratch")
 
       if (r.bytesProduced() > 0) {
-        o.flip()
-        out += copyBuffer(o)
-        o.clear()
+        scratch.flip()
+        out += copyBuffer(scratch)
+        scratch.clear()
       }
-
-      val newRead = bytesRead + r.bytesProduced()
-
-      logger.debug(s"SSL Read Request Status: $r, $o")
 
       r.getHandshakeStatus match {
         case HandshakeStatus.NOT_HANDSHAKING =>
 
           r.getStatus() match {
-            case Status.OK => goRead(newRead)    // successful decrypt, continue
+            case Status.OK => goRead()    // successful decrypt, continue
 
             case Status.BUFFER_UNDERFLOW => // Need more data
-              if (b.hasRemaining) {   // TODO: stash the buffer. I don't like this, but is there another way?
+              if (b.hasRemaining()) {
                 readLeftover = b
               }
 
-              if (out.nonEmpty) p.success(joinBuffers(out))          // We got some data so send it
+              if (out.nonEmpty) p.success(joinBuffers(out)) // We got some data so send it
               else {
-                val readsize = if (size > 0) size - newRead else size
-                channelRead(math.max(readsize, maxNetSize)).onComplete {
-                  case Success(b) => readLoop(b, readsize, out, p)
-                  case Failure(f) => p.tryFailure(f)
-                }(trampoline)
+                val sz = if (size > 0) math.max(size, maxNetSize) else size
+                getBufferRead(sz, p)
               }
 
             // It is up to the next stage to call shutdown, if that is what they want
             case Status.CLOSED =>
-              if (!out.isEmpty) p.success(joinBuffers(out))
+              if (out.nonEmpty) p.success(joinBuffers(out))
               else p.failure(EOF)
 
             case Status.BUFFER_OVERFLOW =>  // resize and go again
               p.tryComplete(invalidPosition("Buffer overflow in readLoop"))
           }
 
-        case _ => // must be handshaking.
-          sslHandshake(b, r.getHandshakeStatus).onComplete {
-            case Success(b)    => readLoop(b, size - bytesRead, out, p)
-            case f@ Failure(_) => p.tryComplete(f)
-          }(trampoline)
+        case _ => // must need to handshake
+          if (out.nonEmpty) { // We've read some data, just offer it up.
+            readLeftover = b
+            p.success(joinBuffers(out))
+          }
+          else {
+            handshakeQueue += ReadOp(size, p)
+            sslHandshake(b, r.getHandshakeStatus)
+          }
       }
     }
 
-    try goRead(0)
+    try goRead()
     catch {
       case t: SSLException =>
         logger.warn(t)("SSLException during read loop")
@@ -199,14 +246,13 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
       o.clear()
       val r = engine.wrap(buffers, o)
 
+      if (o.position() > 0) { // Accumulate any encoded bytes for output
+        o.flip()
+        out += copyBuffer(o)
+      }
+
       r.getHandshakeStatus() match {
         case HandshakeStatus.NOT_HANDSHAKING =>
-
-          if (o.position() > 0) { // Accumulate any encoded bytes for output
-            o.flip()
-            out += copyBuffer(o)
-          }
-
           val buffered = b + r.bytesProduced()
 
           r.getStatus() match {
@@ -214,7 +260,7 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
               if (checkEmpty(buffers)) p.completeWith(channelWrite(out))
               else if (maxWrite > 0 && buffered > maxWrite) {
                 channelWrite(out).onComplete {
-                  case Success(_)    => writeLoop(buffers, new ListBuffer, p)
+                  case Success(_)    => doWrite(buffers, p)
                   case f@ Failure(_) => p.tryComplete(f)
                 }(trampoline)
               }
@@ -233,36 +279,15 @@ final class SSLStage(engine: SSLEngine, maxWrite: Int = 1024*1024) extends MidSt
 
         // r.getHandshakeStatus()
         case _ => // need to handshake
+          handshakeQueue += WriteOp(buffers, p)
+          val data = getQueuedBytes()
 
-          def continue(t: Try[ByteBuffer]): Unit = t match {
-            case Success(b) =>    // In reality, we shouldn't get any data back with a reasonable protocol.
-              val old = readLeftover
-              if (old != null && old.hasRemaining && b.hasRemaining) {
-                readLeftover = concatBuffers(old, b)
-              }
-              else if (b.hasRemaining) {
-                readLeftover = b
-              }
-
-              writeLoop(buffers, out, p)
-            case Failure(t) => p.tryFailure(t)
-          }
-
-          def getInputBuffer() = {   // Get any pending read data for the buffer.
-            val leftovers = readLeftover
-            if (leftovers != null) {
-              readLeftover = null
-              leftovers
-            } else emptyBuffer
-          }
-
-          if (o.position() > 0) { // need to send out some data first, then continue the handshake
-            o.flip()
-            channelWrite(copyBuffer(o))
-              .flatMap { _ => sslHandshake(getInputBuffer(), r.getHandshakeStatus) }(trampoline)
-              .onComplete(continue)(trampoline)
-
-          } else sslHandshake(getInputBuffer(), r.getHandshakeStatus).onComplete(continue)(trampoline)
+          if (out.nonEmpty) { // need to write
+            channelWrite(out).onComplete {
+              case Success(_) => sslHandshake(data, r.getHandshakeStatus())
+              case Failure(t) => handshakeFailure(t)
+            }(trampoline)
+          } else sslHandshake(data, r.getHandshakeStatus())
       }
     }
 
