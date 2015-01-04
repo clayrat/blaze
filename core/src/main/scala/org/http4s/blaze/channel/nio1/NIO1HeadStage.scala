@@ -102,6 +102,7 @@ private[nio1] abstract class NIO1HeadStage(ch: SelectableChannel,
   final override def writeRequest(data: ByteBuffer): Future[Unit] = writeRequest(data::Nil)
 
   final override def writeRequest(data: Seq[ByteBuffer]): Future[Unit] = {
+//    logger.trace("NIO1HeadStage Write Request.")
     val p = Promise[Unit]
     if (writePromise.compareAndSet(null, p)) {
       val writes = data.toArray
@@ -117,7 +118,8 @@ private[nio1] abstract class NIO1HeadStage(ch: SelectableChannel,
       }
     } else writePromise.get match {
       case f :PipeClosedPromise[Unit] => f.future
-      case _                    =>
+      case p                    =>
+        logger.trace(s"Received bad write request: $p")
         Future.failed(new IndexOutOfBoundsException("Cannot have more than one pending write request"))
     }
   }
@@ -155,7 +157,7 @@ private[nio1] abstract class NIO1HeadStage(ch: SelectableChannel,
     if (r != null) r.tryFailure(t)
 
     val w = writePromise.getAndSet(new PipeClosedPromise(t))
-    writeData = null
+    writeData = Array()
     if (w != null) w.tryFailure(t)
 
     try loop.enqueTask(new Runnable {

@@ -47,7 +47,8 @@ object BufferTools {
 
   /** Join the two buffers into a single ByteBuffer */
   def concatBuffers(oldbuff: ByteBuffer, newbuff: ByteBuffer): ByteBuffer = {
-    if (oldbuff != null && oldbuff.hasRemaining) {
+    if (oldbuff == null && newbuff == null) emptyBuffer
+    else if (oldbuff != null && oldbuff.hasRemaining) {
       if (!oldbuff.isReadOnly && oldbuff.capacity() >= oldbuff.limit() + newbuff.remaining()) {
         // Enough room to append to end
         oldbuff.mark()
@@ -75,7 +76,8 @@ object BufferTools {
 
         n
       }
-    } else newbuff
+    }
+    else newbuff
   }
 
   /** Check the array of buffers to ensure they are all empty

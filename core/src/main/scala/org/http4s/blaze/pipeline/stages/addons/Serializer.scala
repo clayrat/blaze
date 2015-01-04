@@ -22,12 +22,12 @@ trait WriteSerializer[I] extends TailStage[I] { self =>
 
   ////////////////////////////////////////////////////////////////////////
 
-  private val _writeLock = new AnyRef
+  private val _serializerWriteLock = new AnyRef
   private var _serializerWriteQueue = new ArrayBuffer[I]
   private var _serializerWritePromise: Promise[Unit] = null
 
   ///  channel writing bits //////////////////////////////////////////////
-  override def channelWrite(data: I): Future[Unit] = _writeLock.synchronized {
+  override def channelWrite(data: I): Future[Unit] = _serializerWriteLock.synchronized {
     if (maxWriteQueue > 0 && _serializerWriteQueue.length > maxWriteQueue) {
       Future.failed(new Exception(s"$name Stage max write queue exceeded: $maxWriteQueue"))
     }
@@ -45,7 +45,7 @@ trait WriteSerializer[I] extends TailStage[I] { self =>
     }
   }
 
-  override def channelWrite(data: Seq[I]): Future[Unit] = _writeLock.synchronized {
+  override def channelWrite(data: Seq[I]): Future[Unit] = _serializerWriteLock.synchronized {
     if (maxWriteQueue > 0 && _serializerWriteQueue.length > maxWriteQueue) {
       Future.failed(new Exception(s"$name Stage max write queue exceeded: $maxWriteQueue"))
     }
@@ -64,7 +64,7 @@ trait WriteSerializer[I] extends TailStage[I] { self =>
   }
 
   // Needs to be in a synchronized because it is called from continuations
-  private def _checkQueue(t: Try[Unit]): Unit = _writeLock.synchronized (t match {
+  private def _checkQueue(t: Try[Unit]): Unit = _serializerWriteLock.synchronized (t match {
     case f@ Failure(_) =>
       _serializerWriteQueue.clear()
       val p = _serializerWritePromise
@@ -77,7 +77,7 @@ trait WriteSerializer[I] extends TailStage[I] { self =>
         val f = {
           if (_serializerWriteQueue.length > 1) { // multiple messages, just give them the queue
             val a = _serializerWriteQueue
-            _serializerWriteQueue = new ArrayBuffer[I]((a.size * 1.25).toInt)
+            _serializerWriteQueue = new ArrayBuffer[I](a.size + 10)
             super.channelWrite(a)
           } else {          // only a single element to write, don't send the while queue
             val h = _serializerWriteQueue.head

@@ -50,10 +50,10 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   private val idManager = new StreamIdManager
   
   private var outbound_initial_window_size = INITIAL_WINDOW_SIZE
-  private var push_enable = ENABLE_PUSH                      // initially enabled
-  private var max_outbound_streams = MAX_CONCURRENT_STREAMS  // initially unbounded.
+  private var push_enable = ENABLE_PUSH                           // initially enabled
+  private var max_outbound_streams = MAX_CONCURRENT_STREAMS       // initially unbounded.
   private var max_frame_size = MAX_FRAME_SIZE
-  private var max_header_size = MAX_HEADER_LIST_SIZE         // initially unbounded
+  private var max_header_size = MAX_HEADER_LIST_SIZE              // initially unbounded
 
   private var receivedGoAway = false
 
@@ -81,7 +81,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       settings :+= Setting(SETTINGS_HEADER_TABLE_SIZE, headerDecoder.maxTableSize)
     }
 
-    logger.debug(s"Sending settings: " + settings)
+    logger.trace(s"Sending settings: " + settings)
     val buff = lock.synchronized(codec.mkSettingsFrame(false, settings))
 
     channelWrite(buff, timeout).flatMap(_ => channelRead()).onComplete {
@@ -145,8 +145,11 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   }
 
   /** called when a node requests a write operation */
-  override protected def onNodeWrite(node: Node, data: Seq[Http2Msg]): Future[Unit] =
+  override protected def onNodeWrite(node: Node, data: Seq[Http2Msg]): Future[Unit] = {
+    logger.trace(s"Node $node sending $data")
     node.attachment.writeMessages(data)
+  }
+
 
   /** called when a node needs more data */
   override protected def onNodeRead(node: Node, size: Int): Future[Http2Msg] = lock.synchronized {
@@ -240,6 +243,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
         val r = processSettings(settings)
         if (r.success) {
           val buff = codec.mkSettingsFrame(true, Nil)
+          logger.trace("Writing settings ACK")
           channelWrite(buff, timeout) // write the ACK settings frame
         }
         r
@@ -497,7 +501,7 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
               buff::bf1
             } else bf1
 
-          if(buffs.nonEmpty) channelWrite(buffs)
+          if (buffs.nonEmpty) channelWrite(buffs, timeout)
 
           Continue
         }
