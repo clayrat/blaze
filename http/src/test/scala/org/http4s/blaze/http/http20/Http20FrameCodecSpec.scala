@@ -72,12 +72,12 @@ class Http20FrameCodecSpec extends Specification {
     "Decode 'END_STREAM flag" in {
       // payload size is buffer + padding + 1 byte
       val buff2 = joinBuffers(encoder.mkDataFrame(dat, 3, false, 100))
-      dec(3, false, dat.remaining() + 101).decodeBuffer(buff2) must_== Continue
+      dec(3, false, dat.remaining() + 100).decodeBuffer(buff2) must_== Continue
     }
 
     "Decode padded buffers" in {
       val buff3 = addBonus(encoder.mkDataFrame(dat, 1, true, 100))
-      dec(1, true, dat.remaining() + 101).decodeBuffer(buff3) must_== Continue
+      dec(1, true, dat.remaining() + 100).decodeBuffer(buff3) must_== Continue
       buff3.remaining() must_== bonusSize
     }
 
@@ -251,5 +251,149 @@ class Http20FrameCodecSpec extends Specification {
       val bs2 = hencoder.mkContinuationFrame(1, true, Nil)
       decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must_== Halt
     }
+  }
+
+    "PUSH_PROMISE frame" should {
+      def dat = mkData(20)
+
+      def dec(sId: Int, pId: Int, end_h: Boolean) =
+        decoder(new MockFrameHandler(false) {
+          override def onPushPromiseFrame(streamId: Int,
+                                          promisedId: Int,
+                                          end_headers: Boolean,
+                                          data: ByteBuffer): Http2Result = {
+
+            sId must_== streamId
+            pId must_== promisedId
+            end_h must_== end_headers
+            assert(compare(data::Nil, dat::Nil))
+            Continue
+          }
+      })
+
+      "make round trip" in {
+        val buff1 = joinBuffers(encoder.mkPushPromiseFrame(1, 2, true, 0, dat))
+        println(buff1)
+        dec(1, 2, true).decodeBuffer(buff1) must_== Continue
+        buff1.remaining() must_== 0
+      }
+
+      "preserve padding" in {
+        val buff = addBonus(encoder.mkPushPromiseFrame(1, 2, true, bonusSize, dat))
+        dec(1, 2, true).decodeBuffer(buff) must_== Continue
+        buff.remaining() must_== bonusSize
+      }
+
+      "fail on bad stream ID" in {
+        encoder.mkPushPromiseFrame(0 , 2, true, -10, dat) must throwA[Exception]
+      }
+
+      "fail on bad promised stream ID" in {
+        encoder.mkPushPromiseFrame(1 , 0, true, -10, dat) must throwA[Exception]
+        encoder.mkPushPromiseFrame(1 , 3, true, -10, dat) must throwA[Exception]
+      }
+
+      "fail on bad padding" in {
+        encoder.mkPushPromiseFrame(1 , 2, true, -10, dat) must throwA[Exception]
+        encoder.mkPushPromiseFrame(1 , 2, true, 500, dat) must throwA[Exception]
+      }
+    }
+
+  "PUSH_PROMISE frame with header decoder" should {
+    def dec(sId: Int, pId: Int, hs: Seq[(String, String)]) =
+      decoder(new MockHeaderDecodingFrameHandler {
+        override def onCompletePushPromiseFrame(headers: HeaderType,
+                                               streamId: Int,
+                                             promisedId: Int): Http2Result = {
+          sId must_== streamId
+          pId must_== promisedId
+          hs must_== headers
+          Halt
+        }
+      })
+
+    "Make a simple round trip" in {
+      val hs = Seq("foo" -> "bar", "biz" -> "baz")
+      val bs = hencoder.mkPushPromiseFrame(1, 2, true, 0, hs)
+
+      println(bs)
+
+      dec(1, 2, hs).decodeBuffer(BufferTools.joinBuffers(bs)) must_== Halt
+    }
+  }
+
+  "PING frame" should {
+    def dec(d: ByteBuffer, a: Boolean) =
+      decoder(new MockHeaderDecodingFrameHandler {
+        override def onPingFrame(data: Array[Byte], ack: Boolean): Http2Result = {
+          ack must_== a
+          assert(compare(ByteBuffer.wrap(data)::Nil, d::Nil))
+          Continue
+        }
+      })
+
+    "make a simple round trip" in {
+      val data = Array(1,2,3,4,5,6,7,8).map(_.toByte)
+
+      val bs1 = encoder.mkPingFrame(data, false)
+      dec(ByteBuffer.wrap(data), false).decodeBuffer(bs1) must_== Continue
+
+      val bs2 = encoder.mkPingFrame(data, true)
+      dec(ByteBuffer.wrap(data), true).decodeBuffer(bs2) must_== Continue
+    }
+  }
+
+  "GOAWAY frame" should {
+    def dec(sId: Int, err: Long, d: ByteBuffer) =
+      decoder(new MockHeaderDecodingFrameHandler {
+
+
+        override def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): Http2Result = {
+          sId must_== lastStream
+          err must_== errorCode
+          assert(compare(d::Nil, debugData::Nil))
+          Continue
+        }
+      })
+
+    "make a simple round trip" in {
+      val bs1 = encoder.mkGoAwayFrame(1, 0, emptyBuffer)
+      dec(1, 0, emptyBuffer).decodeBuffer(joinBuffers(bs1)) must_== Continue
+    }
+
+    "make a round trip with data" in {
+      def data = mkData(20)
+
+      val bs1 = encoder.mkGoAwayFrame(1, 0, data)
+      dec(1, 0, data).decodeBuffer(joinBuffers(bs1)) must_== Continue
+    }
+  }
+
+  "WINDOW_UPDATE frame" should {
+    def dec(sId: Int, inc: Int) =
+      decoder(new MockHeaderDecodingFrameHandler {
+        override def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): Http2Result = {
+          sId must_== streamId
+          inc must_== sizeIncrement
+          Continue
+        }
+      })
+
+    "make a simple round trip" in {
+      val bs1 = encoder.mkWindowUpdateFrame(0, 10)
+      dec(0, 10).decodeBuffer(bs1) must_== Continue
+    }
+
+    "fail on invalid stream" in {
+      encoder.mkWindowUpdateFrame(-1, 10) must throwA[Exception]
+    }
+
+    "fail on invalid window update" in {
+      encoder.mkWindowUpdateFrame(1, 0) must throwA[Exception]
+      encoder.mkWindowUpdateFrame(1, -1) must throwA[Exception]
+      println(Integer.MAX_VALUE)
+      encoder.mkWindowUpdateFrame(1, Integer.MAX_VALUE + 1) must throwA[Exception]
+    }
+
   }
 }

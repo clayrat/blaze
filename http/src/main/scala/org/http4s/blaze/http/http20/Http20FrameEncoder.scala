@@ -9,22 +9,27 @@ trait Http20FrameEncoder {
   def mkDataFrame(data: ByteBuffer, streamId: Int, isLast: Boolean, padding: Byte): Seq[ByteBuffer] = {
 
     require(streamId > 0, "bad DATA frame stream ID")
-    require(padding >= 0 && padding < 255, "Invalid padding of DATA frame")
+    require(padding >= 0 && padding <= 256, "Invalid padding of DATA frame")
 
-    val flags = (if (padding > 0) 0x8 else 0x0) | (if (isLast) 0x1 else 0x0)
-    val paddingSize = if (padding > 0) 1 + padding else 0
+    var flags: Int = 0
+
+    if (padding > 0) {
+      flags |= Flags.PADDED
+    }
+
+    if (isLast) {
+      flags |= Flags.END_STREAM
+    }
 
     val headerBuffer = ByteBuffer.allocate(HeaderSize + (if (padding > 0) 1 else 0))
 
-    writeFrameHeader(data.remaining() + paddingSize, FrameTypes.DATA, flags.toByte, streamId, headerBuffer)
+    writeFrameHeader(data.remaining() + padding, FrameTypes.DATA, flags.toByte, streamId, headerBuffer)
 
-    if (padding > 0) {
-      headerBuffer.put(padding.toByte)
-    }
+    if (padding > 0) headerBuffer.put((padding - 1).toByte)
 
     headerBuffer.flip()
 
-    headerBuffer::data::paddedTail(padding)
+    headerBuffer::data::paddedTail(padding - 1)
   }
 
   def mkHeaderFrame(headerData: ByteBuffer,
@@ -35,7 +40,7 @@ trait Http20FrameEncoder {
                     padding: Int): Seq[ByteBuffer] = {
 
     require(streamId > 0, "bad HEADER frame stream ID")
-    require(padding >= 0 && padding < 255, "Invalid padding of HEADER frame")
+    require(padding >= 0 && padding <= 256, "Invalid padding of HEADER frame")
 
     var flags: Int = 0;
     var size1 = HeaderSize;
@@ -56,9 +61,7 @@ trait Http20FrameEncoder {
     val header = BufferTools.allocate(size1)
     writeFrameHeader(size1 - HeaderSize + headerData.remaining(), FrameTypes.HEADERS, flags.toByte, streamId, header)
 
-    if (padding > 0) {
-      header.put(padding.toByte)
-    }
+    if (padding > 0) header.put((padding - 1).toByte)
 
     priority match {
       case Some(p) => writePriority(p, header)
@@ -67,7 +70,7 @@ trait Http20FrameEncoder {
 
     header.flip()
 
-    header::headerData::paddedTail(padding)
+    header::headerData::paddedTail(padding - 1)
   }
 
   def mkPriorityFrame(streamId: Int, priority: Priority): ByteBuffer = {
@@ -114,14 +117,14 @@ trait Http20FrameEncoder {
   }
 
   def mkPushPromiseFrame(streamId: Int,
-                         promiseId: Int,
-                         end_headers: Boolean,
-                         padding: Int,
-                         headerBuffer: ByteBuffer): Seq[ByteBuffer] = {
+                        promiseId: Int,
+                      end_headers: Boolean,
+                          padding: Int,
+                     headerBuffer: ByteBuffer): Seq[ByteBuffer] = {
 
     require(streamId != 0, "Invalid StreamID for PUSH_PROMISE frame")
     require(promiseId != 0 && promiseId % 2 == 0, "Invalid StreamID for PUSH_PROMISE frame")
-    require(padding >= 0 && padding < 255, "Invalid padding of HEADER frame")
+    require(0 <= padding && padding <= 256, "Invalid padding of HEADER frame")
 
     var size = 4;
     var flags = 0;
@@ -130,14 +133,19 @@ trait Http20FrameEncoder {
 
     if (padding > 0) {
       flags |= Flags.PADDED
-      size += 1
+      size += padding
     }
 
-    val buffer = BufferTools.allocate(HeaderSize + size)
+    val buffer = BufferTools.allocate(HeaderSize + (if (padding > 0) 5 else 4))
     writeFrameHeader(size + headerBuffer.remaining(), FrameTypes.PUSH_PROMISE, flags.toByte, streamId, buffer)
+
+    if (padding > 0) buffer.put((padding - 1).toByte)
+
+    buffer.putInt(promiseId)
+
     buffer.flip()
 
-    buffer::headerBuffer::paddedTail(padding)
+    buffer::headerBuffer::paddedTail(padding - 1)
   }
 
   def mkPingFrame(data: Array[Byte], ack: Boolean): ByteBuffer = {
@@ -169,7 +177,7 @@ trait Http20FrameEncoder {
 
   def mkWindowUpdateFrame(streamId: Int, increment: Int): ByteBuffer = {
     require(streamId >= 0, "Invalid stream ID for WINDOW_UPDATE")
-    require(increment > 0, "Invalid stream increment for WINDOW_UPDATE")
+    require( 0 < increment && increment <= Integer.MAX_VALUE, "Invalid stream increment for WINDOW_UPDATE")
 
     val size = 4
 
@@ -199,8 +207,8 @@ trait Http20FrameEncoder {
     buffer.put(((p.priority - 1) & 0xff).toByte)
   }
 
-  private def paddedTail(padding: Int): List[ByteBuffer] = {
-    if (padding > 0) BufferTools.allocate(padding)::Nil
+  private def paddedTail(padBytes: Int): List[ByteBuffer] = {
+    if (padBytes > 0) BufferTools.allocate(padBytes)::Nil
     else             Nil
   }
 

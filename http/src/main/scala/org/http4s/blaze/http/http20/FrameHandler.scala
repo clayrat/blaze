@@ -12,7 +12,7 @@ trait FrameHandler {
                      priority: Option[Priority],
                   end_headers: Boolean,
                    end_stream: Boolean,
-                   buffer: ByteBuffer): Http2Result
+                         data: ByteBuffer): Http2Result
 
   def onPriorityFrame(streamId: Int, priority: Priority): Http2Result
 

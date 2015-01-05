@@ -187,7 +187,6 @@ trait Http20FrameDecoder {
 
   //////////// PUSH_PROMISE ///////////////
   private def decodePushPromiseFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
-
     if (streamId == 0) {
       return Error(PROTOCOL_ERROR("Data frame with streamID 0x0"))
     }

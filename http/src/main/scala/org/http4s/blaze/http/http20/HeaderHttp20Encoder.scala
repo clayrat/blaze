@@ -11,14 +11,12 @@ trait HeaderHttp20Encoder { self: Http20FrameEncoder =>
 
   final def setEncoderMaxTable(max: Int): Unit = { headerEncoder.setMaxTableSize(max) }
 
-  final def mkHeaderFrame(
-                     headers: Headers,
-                    streamId: Int,
-                    priority: Option[Priority],
-                    end_headers: Boolean,
-                    end_stream: Boolean,
-                    padding: Int
-                           ): Seq[ByteBuffer] = {
+  final def mkHeaderFrame(headers: Headers,
+                         streamId: Int,
+                         priority: Option[Priority],
+                      end_headers: Boolean,
+                       end_stream: Boolean,
+                          padding: Int): Seq[ByteBuffer] = {
 
     val buffer = headerEncoder.encodeHeaders(headers)
 
@@ -26,10 +24,10 @@ trait HeaderHttp20Encoder { self: Http20FrameEncoder =>
   }
 
   final def mkPushPromiseFrame(streamId: Int,
-                                  promiseId: Int,
-                                  end_headers: Boolean,
-                                  padding: Int,
-                                  headers: Headers): Seq[ByteBuffer] = {
+                              promiseId: Int,
+                            end_headers: Boolean,
+                                padding: Int,
+                                headers: Headers): Seq[ByteBuffer] = {
     val buffer = headerEncoder.encodeHeaders(headers)
     mkPushPromiseFrame(streamId, promiseId, end_headers, padding, buffer)
   }
