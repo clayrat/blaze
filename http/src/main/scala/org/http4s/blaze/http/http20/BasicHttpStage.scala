@@ -7,6 +7,7 @@ import org.http4s.blaze.http._
 import org.http4s.blaze.pipeline.{ Command => Cmd }
 import org.http4s.blaze.pipeline.TailStage
 import org.http4s.blaze.util.BufferTools
+import Http2Exception.{ PROTOCOL_ERROR, INTERNAL_ERROR }
 
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.ExecutionContext
@@ -23,11 +24,16 @@ class BasicHttpStage(timeout: Duration, ec: ExecutionContext, service: HttpServi
 
   private implicit def _ec = ec   // for all the onComplete calls
 
-  override def name = "BasicHTTP/2.0Node"
+  override def name = "BasicHTTPNode"
 
   override protected def stageStartup(): Unit = {
     super.stageStartup()
     readHeaders()
+  }
+
+  private def shutdownWithCommand(cmd: Cmd.OutboundCommand): Unit = {
+    stageShutdown()
+    sendOutboundCommand(cmd)
   }
 
   private def readHeaders(): Unit = {
@@ -47,11 +53,6 @@ class BasicHttpStage(timeout: Duration, ec: ExecutionContext, service: HttpServi
         val e = INTERNAL_ERROR(s"Unknown error")
         shutdownWithCommand(Cmd.Error(e))
     }
-  }
-
-  private def shutdownWithCommand(cmd: Cmd.OutboundCommand): Unit = {
-    stageShutdown()
-    sendOutboundCommand(cmd)
   }
 
   private def getBody(hs: Headers, acc: ArrayBuffer[ByteBuffer]): Unit = channelRead(timeout = timeout).onComplete {
@@ -93,7 +94,7 @@ class BasicHttpStage(timeout: Duration, ec: ExecutionContext, service: HttpServi
       case (Scheme, v)    => if (scheme == null) scheme = v else error += "Multiple ':scheme' headers defined. "
       case (Path, v)      => if (path == null)   path   = v else error += "Multiple ':path' headers defined. "
       case (Authority, _) => // NOOP; TODO: we should keep the authority header
-      case h@(k, _) if k.startsWith(":") => logger.warn(s"Unknown pseudo-header: $h")
+      case h@(k, _) if k.startsWith(":") => logger.info(s"Unknown pseudo-header: $h")
       case header         => normalHeaders += header
     }
 
@@ -110,6 +111,7 @@ class BasicHttpStage(timeout: Duration, ec: ExecutionContext, service: HttpServi
 
   private def renderResponse(resp: Response): Unit = resp match {
     case SimpleHttpResponse(_, code, headers, body) =>
+                                                      // probably unnecessary micro-opt
       val hs = new ArrayBuffer[(String, String)](headers match {case b: IndexedSeq[_] => b.size + 1; case _ => 16 })
       hs += ((Status, code.toString))
       headers.foreach{ case (k, v) => hs += ((k.toLowerCase(Locale.ROOT), v)) }

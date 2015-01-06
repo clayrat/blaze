@@ -14,6 +14,15 @@ private[http20] abstract class NodeMsgEncoder[HType](id: Int,
 
   private type Http2Msg = NodeMsg.Http2Msg[HType]
 
+  /** Encodes messages until they are all done or maxWindow has been reached
+    *
+    * @param maxPayloadSize Max size to allow a frame payload (not counting the 9 header bytes
+    * @param maxWindow Max flow control window bytes allowed to encode
+    * @param msgs messages to encode
+    * @param acc accumulator to store the resulting ByteBuffers
+    * @return the number of flow control bytes written and any unused frames. Note that the
+    *         ByteBuffers of data frames may have changed, but the references will be the same.
+    */
   protected def encodeMessages(maxPayloadSize: Int, maxWindow: Int, msgs: Seq[Http2Msg], acc: Buffer[ByteBuffer]): (Int, Seq[Http2Msg]) = {
 
     @tailrec

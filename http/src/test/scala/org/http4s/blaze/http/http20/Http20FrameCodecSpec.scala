@@ -2,6 +2,7 @@ package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
 
+import org.http4s.blaze.http.http20.Settings.Setting
 import org.http4s.blaze.util.BufferTools
 import org.http4s.blaze.util.BufferTools._
 
@@ -212,16 +213,16 @@ class Http20FrameCodecSpec extends Specification {
 
   def hencoder = new HeaderHttp20Encoder with Http20FrameEncoder {
     override type Headers = Seq[(String,String)]
-    override protected val headerEncoder: HeaderEncoder[Headers] = new SeqTupleHeaderEncoder()
+    override protected val headerEncoder: HeaderEncoder[Headers] = new TupleHeaderEncoder()
   }
 
   "HEADERS frame with compressors" should {
     def dec(sId: Int, p: Option[Priority], es: Boolean, hs: Seq[(String, String)]) =
-      decoder(new MockHeaderDecodingFrameHandler {
-        override def onCompleteHeadersFrame(headers: Seq[(String,String)],
-                                            streamId: Int,
+      decoder(new MockDecodingFrameHandler {
+        override def onCompleteHeadersFrame(streamId: Int,
                                             priority: Option[Priority],
-                                            end_stream: Boolean): Http2Result = {
+                                            end_stream: Boolean,
+                                            headers: Seq[(String,String)]): Http2Result = {
           sId must_== streamId
           p must_== priority
           es must_== end_stream
@@ -232,14 +233,14 @@ class Http20FrameCodecSpec extends Specification {
 
     "Make a simple round trip" in {
       val hs = Seq("foo" -> "bar", "biz" -> "baz")
-      val bs = hencoder.mkHeaderFrame(hs, 1, None, true, true, 0)
+      val bs = hencoder.mkHeaderFrame(1, None, true, true, 0, hs)
 
       dec(1, None, true, hs).decodeBuffer(BufferTools.joinBuffers(bs)) must_== Halt
     }
 
     "Make a round trip with a continuation frame" in {
       val hs = Seq("foo" -> "bar", "biz" -> "baz")
-      val bs = hencoder.mkHeaderFrame(hs, 1, None, false, true, 0)
+      val bs = hencoder.mkHeaderFrame(1, None, false, true, 0, hs)
 
       val decoder = dec(1, None, true, hs)
 
@@ -250,6 +251,69 @@ class Http20FrameCodecSpec extends Specification {
 
       val bs2 = hencoder.mkContinuationFrame(1, true, Nil)
       decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must_== Halt
+    }
+
+    "Make a round trip with a continuation frame" in {
+      val hs = Seq("foo" -> "bar", "biz" -> "baz")
+      val bs = hencoder.mkHeaderFrame(1, None, false, true, 0, Nil)
+
+      val decoder = dec(1, None, true, hs)
+
+      decoder.inHeaderSequence() must_== false
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      decoder.inHeaderSequence() must_== true
+
+      val bs2 = hencoder.mkContinuationFrame(1, true, hs)
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must_== Halt
+    }
+
+    "Make a round trip with a continuation frame" in {
+      val hs1 = Seq("foo" -> "bar")
+      val hs2 = Seq("biz" -> "baz")
+      val bs = hencoder.mkHeaderFrame(1, None, false, true, 0, hs1)
+
+      val decoder = dec(1, None, true, hs1 ++ hs2)
+
+      decoder.inHeaderSequence() must_== false
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      decoder.inHeaderSequence() must_== true
+
+      val bs2 = hencoder.mkContinuationFrame(1, true, hs2)
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must_== Halt
+    }
+
+    "Fail on invalid frame sequence (bad streamId)" in {
+      val hs1 = Seq("foo" -> "bar")
+      val hs2 = Seq("biz" -> "baz")
+      val bs = hencoder.mkHeaderFrame(1, None, false, true, 0, hs1)
+
+      val decoder = dec(1, None, true, hs1 ++ hs2)
+
+      decoder.inHeaderSequence() must_== false
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      decoder.inHeaderSequence() must_== true
+
+      val bs2 = hencoder.mkContinuationFrame(2, true, hs2)
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must beAnInstanceOf[Error]
+    }
+
+    "Fail on invalid frame sequence (wrong frame type)" in {
+      val hs1 = Seq("foo" -> "bar")
+      val hs2 = Seq("biz" -> "baz")
+      val bs = hencoder.mkHeaderFrame(1, None, false, true, 0, hs1)
+
+      val decoder = dec(1, None, true, hs1 ++ hs2)
+
+      decoder.inHeaderSequence() must_== false
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      decoder.inHeaderSequence() must_== true
+
+      val bs2 = hencoder.mkWindowUpdateFrame(2, 1)
+      decoder.decodeBuffer(bs2) must beAnInstanceOf[Error]
     }
   }
 
@@ -273,7 +337,6 @@ class Http20FrameCodecSpec extends Specification {
 
       "make round trip" in {
         val buff1 = joinBuffers(encoder.mkPushPromiseFrame(1, 2, true, 0, dat))
-        println(buff1)
         dec(1, 2, true).decodeBuffer(buff1) must_== Continue
         buff1.remaining() must_== 0
       }
@@ -301,10 +364,10 @@ class Http20FrameCodecSpec extends Specification {
 
   "PUSH_PROMISE frame with header decoder" should {
     def dec(sId: Int, pId: Int, hs: Seq[(String, String)]) =
-      decoder(new MockHeaderDecodingFrameHandler {
-        override def onCompletePushPromiseFrame(headers: HeaderType,
-                                               streamId: Int,
-                                             promisedId: Int): Http2Result = {
+      decoder(new MockDecodingFrameHandler {
+        override def onCompletePushPromiseFrame(streamId: Int,
+                                              promisedId: Int,
+                                                 headers: HeaderType): Http2Result = {
           sId must_== streamId
           pId must_== promisedId
           hs must_== headers
@@ -320,12 +383,83 @@ class Http20FrameCodecSpec extends Specification {
 
       dec(1, 2, hs).decodeBuffer(BufferTools.joinBuffers(bs)) must_== Halt
     }
+
+    "Make a round trip with a continuation frame" in {
+      val hs = Seq("foo" -> "bar", "biz" -> "baz")
+      val bs = hencoder.mkPushPromiseFrame(1, 2, false, 0, hs)
+
+      val decoder = dec(1, 2, hs)
+
+      decoder.inHeaderSequence() must_== false
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      decoder.inHeaderSequence() must_== true
+
+      val bs2 = hencoder.mkContinuationFrame(1, true, Nil)
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must_== Halt
+    }
+
+    "Make a round trip with a continuation frame" in {
+      val hs = Seq("foo" -> "bar", "biz" -> "baz")
+      val bs = hencoder.mkPushPromiseFrame(1, 2, false, 0, Nil)
+
+      val decoder = dec(1, 2, hs)
+
+      decoder.inHeaderSequence() must_== false
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      decoder.inHeaderSequence() must_== true
+
+      val bs2 = hencoder.mkContinuationFrame(1, true, hs)
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must_== Halt
+    }
+
+    "Make a round trip with a continuation frame" in {
+      val hs1 = Seq("foo" -> "bar")
+      val hs2 = Seq("biz" -> "baz")
+      val bs = hencoder.mkPushPromiseFrame(1, 2, false, 0, hs1)
+
+      val decoder = dec(1, 2, hs1 ++ hs2)
+
+      decoder.inHeaderSequence() must_== false
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      decoder.inHeaderSequence() must_== true
+
+      val bs2 = hencoder.mkContinuationFrame(1, true, hs2)
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must_== Halt
+    }
+
+    "Fail on invalid frame sequence (wrong streamId)" in {
+      val hs1 = Seq("foo" -> "bar")
+      val hs2 = Seq("biz" -> "baz")
+      val bs = hencoder.mkPushPromiseFrame(1, 2, false, 0, hs1)
+
+      val decoder = dec(1, 2, hs1 ++ hs2)
+
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      val bs2 = hencoder.mkContinuationFrame(2, true, hs2)
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs2)) must beAnInstanceOf[Error]
+    }
+
+    "Fail on invalid frame sequence (wrong frame type)" in {
+      val hs1 = Seq("foo" -> "bar")
+      val bs = hencoder.mkPushPromiseFrame(1, 2, false, 0, hs1)
+
+      val decoder = dec(1, 2, hs1)
+
+      decoder.decodeBuffer(BufferTools.joinBuffers(bs)) must_== Continue
+
+      val bs2 = hencoder.mkWindowUpdateFrame(2, 1)
+      decoder.decodeBuffer(bs2) must beAnInstanceOf[Error]
+    }
   }
 
   "PING frame" should {
     def dec(d: ByteBuffer, a: Boolean) =
-      decoder(new MockHeaderDecodingFrameHandler {
-        override def onPingFrame(data: Array[Byte], ack: Boolean): Http2Result = {
+      decoder(new MockDecodingFrameHandler {
+        override def onPingFrame(ack: Boolean, data: Array[Byte]): Http2Result = {
           ack must_== a
           assert(compare(ByteBuffer.wrap(data)::Nil, d::Nil))
           Continue
@@ -335,17 +469,17 @@ class Http20FrameCodecSpec extends Specification {
     "make a simple round trip" in {
       val data = Array(1,2,3,4,5,6,7,8).map(_.toByte)
 
-      val bs1 = encoder.mkPingFrame(data, false)
+      val bs1 = encoder.mkPingFrame(false, data)
       dec(ByteBuffer.wrap(data), false).decodeBuffer(bs1) must_== Continue
 
-      val bs2 = encoder.mkPingFrame(data, true)
+      val bs2 = encoder.mkPingFrame(true, data)
       dec(ByteBuffer.wrap(data), true).decodeBuffer(bs2) must_== Continue
     }
   }
 
   "GOAWAY frame" should {
     def dec(sId: Int, err: Long, d: ByteBuffer) =
-      decoder(new MockHeaderDecodingFrameHandler {
+      decoder(new MockDecodingFrameHandler {
 
 
         override def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): Http2Result = {
@@ -371,7 +505,7 @@ class Http20FrameCodecSpec extends Specification {
 
   "WINDOW_UPDATE frame" should {
     def dec(sId: Int, inc: Int) =
-      decoder(new MockHeaderDecodingFrameHandler {
+      decoder(new MockDecodingFrameHandler {
         override def onWindowUpdateFrame(streamId: Int, sizeIncrement: Int): Http2Result = {
           sId must_== streamId
           inc must_== sizeIncrement

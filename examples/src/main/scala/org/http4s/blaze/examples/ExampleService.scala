@@ -4,7 +4,7 @@ import java.nio.ByteBuffer
 
 import org.http4s.blaze.examples.http20.Http2Server._
 import org.http4s.blaze.http._
-import org.http4s.blaze.http.http20.{SeqTupleHeaderEncoder, SeqTupleHeaderDecoder, Http2ServerHubStage, BasicHttpStage}
+import org.http4s.blaze.http.http20.{TupleHeaderEncoder, TupleHeaderDecoder, Http2ServerHubStage, BasicHttpStage}
 import org.http4s.blaze.pipeline.LeafBuilder
 import org.http4s.blaze.pipeline.stages.monitors.IntervalConnectionMonitor
 import org.http4s.blaze.util.Execution._
@@ -20,8 +20,8 @@ object ExampleService {
   def http2Stage(status: Option[IntervalConnectionMonitor], maxHeadersLength: Int): Http2ServerHubStage[Headers] = {
     def newNode(): LeafBuilder[Http2Meg] = LeafBuilder(new BasicHttpStage(Duration.Inf, trampoline, service(status)))
     new Http2ServerHubStage[Headers](
-      new SeqTupleHeaderDecoder(maxHeadersLength),
-      new SeqTupleHeaderEncoder(),
+      new TupleHeaderDecoder(maxHeadersLength),
+      new TupleHeaderEncoder(),
       newNode,
       Duration.Inf,
       300

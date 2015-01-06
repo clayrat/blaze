@@ -2,12 +2,16 @@ package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
 
+import Settings.Setting
+import Http2Exception._
+
 import scala.collection.mutable.ArrayBuffer
 
 
 /* The job of the Http20FrameCodec is to slice the ByteBuffers. It does
    not attempt to decode headers or perform any size limiting operations */
 trait Http20FrameDecoder {
+  import bits._
 
   def handler: FrameHandler
 
@@ -37,9 +41,6 @@ trait Http20FrameDecoder {
     if (handler.inHeaderSequence() && frameType != FrameTypes.CONTINUATION) {
       return Error(PROTOCOL_ERROR(s"Received frame type $frameType while in in headers sequence"))
     }
-
-    // TODO: remove this debug code. Why not a logger?
-//    println(s"buffer: $buffer, len: $len, type: ${frameType}, ID: $streamId, flags: $flags")
 
     // set frame sizes in the ByteBuffer and decode
     val oldLimit = buffer.limit()
@@ -216,7 +217,7 @@ trait Http20FrameDecoder {
     val pingBytes = new Array[Byte](pingSize)
     buffer.get(pingBytes)
 
-    handler.onPingFrame(pingBytes, Flags.ACK(flags))
+    handler.onPingFrame(Flags.ACK(flags), pingBytes)
   }
 
   //////////// GOAWAY ///////////////
@@ -254,8 +255,10 @@ trait Http20FrameDecoder {
 
   //////////// CONTINUATION ///////////////
   private def decodeContinuationFrame(buffer: ByteBuffer, streamId: Int, flags: Byte): Http2Result = {
-
-    if (streamId == 0) Error(PROTOCOL_ERROR("CONTINUATION frame with stream dependency 0x0"))
+    if (streamId <= 0) {
+      val msg = s"CONTINUATION frame with invalid stream dependency: 0x${Integer.toHexString(streamId)}"
+      Error(PROTOCOL_ERROR(msg))
+    }
     else handler.onContinuationFrame(streamId, Flags.END_HEADERS(flags), buffer.slice())
   }
 
@@ -267,7 +270,10 @@ trait Http20FrameDecoder {
       if (padding >= buffer.remaining()) {
         Error(PROTOCOL_ERROR(s"Padding, $padding, exceeds payload length: ${buffer.remaining}"))
       }
-      else { buffer.limit(buffer.limit() - padding); Continue }
+      else {
+        buffer.limit(buffer.limit() - padding)
+        Continue
+      }
     }
     else Continue
   }

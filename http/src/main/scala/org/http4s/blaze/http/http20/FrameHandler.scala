@@ -2,6 +2,8 @@ package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
 
+import org.http4s.blaze.http.http20.Settings.Setting
+
 trait FrameHandler {
 
   def inHeaderSequence(): Boolean
@@ -22,7 +24,7 @@ trait FrameHandler {
 
   def onPushPromiseFrame(streamId: Int, promisedId: Int, end_headers: Boolean, data: ByteBuffer): Http2Result
 
-  def onPingFrame(data: Array[Byte], ack: Boolean): Http2Result
+  def onPingFrame(ack: Boolean, data: Array[Byte]): Http2Result
 
   def onGoAwayFrame(lastStream: Int, errorCode: Long, debugData: ByteBuffer): Http2Result
 

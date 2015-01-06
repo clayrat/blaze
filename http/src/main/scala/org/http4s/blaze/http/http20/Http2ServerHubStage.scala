@@ -11,6 +11,8 @@ import org.http4s.blaze.pipeline.stages.HubStage
 import org.http4s.blaze.util.BufferTools
 import org.http4s.blaze.util.Execution.trampoline
 
+import Settings.{ DefaultSettings => Default, Setting }
+
 import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -24,11 +26,12 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
                                         node_builder: () => LeafBuilder[NodeMsg.Http2Msg[HType]],
                                              timeout: Duration,
                                    maxInboundStreams: Int,
-                                       inboundWindow: Int = DefaultSettings.INITIAL_WINDOW_SIZE)
+                                       inboundWindow: Int = Default.INITIAL_WINDOW_SIZE)
   extends HubStage[ByteBuffer] with WriteSerializer[ByteBuffer]
 { hub =>
-  import DefaultSettings._
-  import SettingsKeys._
+
+  import Http2Exception._ // used by pretty much all the error handling
+  import bits._
   
   require(maxInboundStreams > 0, "Invalid max streams")
 
@@ -49,11 +52,11 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
 
   private val idManager = new StreamIdManager
   
-  private var outbound_initial_window_size = INITIAL_WINDOW_SIZE
-  private var push_enable = ENABLE_PUSH                           // initially enabled
-  private var max_outbound_streams = MAX_CONCURRENT_STREAMS       // initially unbounded.
-  private var max_frame_size = MAX_FRAME_SIZE
-  private var max_header_size = MAX_HEADER_LIST_SIZE              // initially unbounded
+  private var outbound_initial_window_size = Default.INITIAL_WINDOW_SIZE
+  private var push_enable = Default.ENABLE_PUSH                           // initially enabled
+  private var max_outbound_streams = Default.MAX_CONCURRENT_STREAMS       // initially unbounded.
+  private var max_frame_size = Default.MAX_FRAME_SIZE
+  private var max_header_size = Default.MAX_HEADER_LIST_SIZE              // initially unbounded
 
   private var receivedGoAway = false
 
@@ -71,14 +74,14 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   override protected def stageStartup() {
     super.stageStartup()
 
-    var settings = Vector.empty :+ Setting(SETTINGS_MAX_CONCURRENT_STREAMS, maxInboundStreams)
+    var settings = Vector.empty :+ Setting(Settings.MAX_CONCURRENT_STREAMS, maxInboundStreams)
 
-    if (inboundWindow != INITIAL_WINDOW_SIZE) {
-      settings :+= Setting(SETTINGS_INITIAL_WINDOW_SIZE, inboundWindow)
+    if (inboundWindow != Default.INITIAL_WINDOW_SIZE) {
+      settings :+= Setting(Settings.INITIAL_WINDOW_SIZE, inboundWindow)
     }
 
-    if (headerDecoder.maxTableSize != DefaultSettings.HEADER_TABLE_SIZE) {
-      settings :+= Setting(SETTINGS_HEADER_TABLE_SIZE, headerDecoder.maxTableSize)
+    if (headerDecoder.maxTableSize != Default.HEADER_TABLE_SIZE) {
+      settings :+= Setting(Settings.HEADER_TABLE_SIZE, headerDecoder.maxTableSize)
     }
 
     logger.trace(s"Sending settings: " + settings)
@@ -172,18 +175,18 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
   ///////////////////////// The FrameHandler decides how to decode incoming frames ///////////////////////
   
   // All the methods in here will be called from `codec` and thus synchronization can be managed through codec calls
-  private object FrameHandler extends HeaderDecodingFrameHandler {
+  private object FrameHandler extends DecodingFrameHandler {
     override type HeaderType = HType
 
     override protected val headerDecoder = hub.headerDecoder
 
-    override def onCompletePushPromiseFrame(headers: HeaderType, streamId: Int, promisedId: Int): Http2Result =
+    override def onCompletePushPromiseFrame(streamId: Int, promisedId: Int, headers: HeaderType): Http2Result =
       Error(PROTOCOL_ERROR("Server received a PUSH_PROMISE frame from a client", streamId))
 
-    override def onCompleteHeadersFrame(headers: HeaderType,
-                                       streamId: Int,
-                                       priority: Option[Priority],
-                                     end_stream: Boolean): Http2Result =
+    override def onCompleteHeadersFrame(streamId: Int,
+                                        priority: Option[Priority],
+                                      end_stream: Boolean,
+                                         headers: HeaderType): Http2Result =
     {
       val msg = NodeMsg.HeadersFrame(priority, end_stream, headers)
 
@@ -231,8 +234,8 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       }
     }
 
-    override def onPingFrame(data: Array[Byte], ack: Boolean): Http2Result = {
-      channelWrite(codec.mkPingFrame(data, true), timeout)
+    override def onPingFrame(ack: Boolean, data: Array[Byte]): Http2Result = {
+      channelWrite(codec.mkPingFrame(true, data), timeout)
       Continue
     }
 
@@ -255,31 +258,31 @@ final class Http2ServerHubStage[HType](headerDecoder: HeaderDecoder[HType],
       if (settings.isEmpty) Continue
       else {
         val r = settings.head match {
-          case Setting(SETTINGS_HEADER_TABLE_SIZE, v) =>
+          case Setting(Settings.HEADER_TABLE_SIZE, v) =>
             codec.setEncoderMaxTable(v.toInt)
             Continue
 
-          case Setting(SETTINGS_ENABLE_PUSH, v) =>
+          case Setting(Settings.ENABLE_PUSH, v) =>
             if (v == 0) { push_enable = false; Continue }
             else if (v == 1) {  push_enable = true; Continue }
             else Error(PROTOCOL_ERROR(s"Invalid ENABLE_PUSH setting value: $v"))
 
-          case Setting(SETTINGS_MAX_CONCURRENT_STREAMS, v) =>
+          case Setting(Settings.MAX_CONCURRENT_STREAMS, v) =>
             if (v > Integer.MAX_VALUE) {
               Error(PROTOCOL_ERROR(s"To large MAX_CONCURRENT_STREAMS: $v"))
             } else { max_outbound_streams = v.toInt; Continue }
 
-          case Setting(SETTINGS_INITIAL_WINDOW_SIZE, v) =>
+          case Setting(Settings.INITIAL_WINDOW_SIZE, v) =>
             if (v > Integer.MAX_VALUE) Error(PROTOCOL_ERROR(s"Invalid initial window size: $v"))
             else { FlowControl.onInitialWindowSizeChange(v.toInt); Continue }
 
-          case Setting(SETTINGS_MAX_FRAME_SIZE, v) =>
+          case Setting(Settings.MAX_FRAME_SIZE, v) =>
             // max of 2^24-1 http/2.0 draft 16 spec
-            if (v < MAX_FRAME_SIZE || v > 16777215) Error(PROTOCOL_ERROR(s"Invalid frame size: $v"))
+            if (v < Default.MAX_FRAME_SIZE || v > 16777215) Error(PROTOCOL_ERROR(s"Invalid frame size: $v"))
             else { max_frame_size = v.toInt; Continue }
 
 
-          case Setting(SETTINGS_MAX_HEADER_LIST_SIZE, v) =>
+          case Setting(Settings.MAX_HEADER_LIST_SIZE, v) =>
             if (v > Integer.MAX_VALUE) Error(PROTOCOL_ERROR(s"SETTINGS_MAX_HEADER_LIST_SIZE to large: $v"))
             else { max_header_size = v.toInt; Continue }
 

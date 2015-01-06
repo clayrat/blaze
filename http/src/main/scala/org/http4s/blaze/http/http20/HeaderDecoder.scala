@@ -3,18 +3,33 @@ package org.http4s.blaze.http.http20
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets.US_ASCII
 
+import org.http4s.blaze.http.http20.Settings.DefaultSettings
 import org.http4s.blaze.util.BufferTools
-
-import scala.collection.mutable.ArrayBuffer
 
 import com.twitter.hpack.{Decoder, HeaderListener}
 
+/** Abstract representation of a `Headers` builder
+  *
+  * This is much like the scala collection `Builder`s with the
+  * exception that we know things will come in pairs, but we don't
+  * know the exact structure of that pair.
+  *
+  * @param maxHeaderSize maximum allowed size of a single header
+  * @param maxTableSize maximum compression table to maintain
+  * @tparam To the result of this builder
+  */
 abstract class HeaderDecoder[To](maxHeaderSize: Int,
                               val maxTableSize: Int) { self =>
 
   require(maxTableSize >= DefaultSettings.HEADER_TABLE_SIZE)
 
   private var leftovers: ByteBuffer = null
+
+  /** abstract method that adds the key value pair to the internal representation */
+  protected def addHeader(name: String, value: String, sensitive: Boolean): Unit
+
+  /** Returns the header collection and clears the builder */
+  def result(): To
 
   private val decoder = new Decoder(maxHeaderSize, maxTableSize)
   private val listener = new HeaderListener {
@@ -25,21 +40,14 @@ abstract class HeaderDecoder[To](maxHeaderSize: Int,
     }
   }
 
-  def addHeader(name: String, value: String, sensitive: Boolean): Unit
-
-  def empty(): Boolean
-
-  /** Returns the header collection and clears the builder */
-  def result(): To
-
   final def decode(buffer: ByteBuffer): Unit = {
     val buff = BufferTools.concatBuffers(leftovers, buffer)
     val is = new ByteBufferInputStream(buff)
     decoder.decode(is, listener)
 
     if (!buff.hasRemaining()) leftovers = null
-    else if (buff ne buffer) leftovers = buff
-    else {  // need to drain the input buffer so we are not sharing this buffer with someone else
+    else if (buff ne buffer) leftovers = buff // we made a copy with concatBuffers
+    else {  // buff == input buffer. Need to copy the input buffer so we are not sharing it
       val b = BufferTools.allocate(buff.remaining())
       b.put(buff).flip()
       leftovers = b
@@ -49,20 +57,5 @@ abstract class HeaderDecoder[To](maxHeaderSize: Int,
   final def setMaxTableSize(max: Int): Unit = decoder.setMaxHeaderTableSize(max)
 }
 
-final class SeqTupleHeaderDecoder(maxHeaderSize: Int,
-                                 maxHeaderTable: Int  = DefaultSettings.HEADER_TABLE_SIZE)
-  extends HeaderDecoder[Seq[(String, String)]](maxHeaderSize, maxHeaderTable) {
 
-  private var acc = new ArrayBuffer[(String, String)]
 
-  override def addHeader(name: String, value: String, sensitive: Boolean): Unit = acc += ((name, value))
-
-  /** Returns the header collection and clears the builder */
-  override def result(): Seq[(String, String)] = {
-    val r = acc
-    acc = new ArrayBuffer[(String, String)](r.size + 10)
-    r
-  }
-
-  override def empty(): Boolean = acc.isEmpty
-}

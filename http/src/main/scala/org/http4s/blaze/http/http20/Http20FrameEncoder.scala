@@ -2,9 +2,11 @@ package org.http4s.blaze.http.http20
 
 import java.nio.ByteBuffer
 
+import org.http4s.blaze.http.http20.Settings.Setting
 import org.http4s.blaze.util.BufferTools
 
 trait Http20FrameEncoder {
+  import bits._
 
   def mkDataFrame(data: ByteBuffer, streamId: Int, isLast: Boolean, padding: Byte): Seq[ByteBuffer] = {
 
@@ -148,7 +150,7 @@ trait Http20FrameEncoder {
     buffer::headerBuffer::paddedTail(padding - 1)
   }
 
-  def mkPingFrame(data: Array[Byte], ack: Boolean): ByteBuffer = {
+  def mkPingFrame(ack: Boolean, data: Array[Byte]): ByteBuffer = {
     val size = 8
     require(data.length == size, "Ping data must be 8 bytes long")
 

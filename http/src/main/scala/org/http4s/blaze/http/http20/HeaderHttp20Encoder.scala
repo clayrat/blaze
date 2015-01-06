@@ -11,12 +11,12 @@ trait HeaderHttp20Encoder { self: Http20FrameEncoder =>
 
   final def setEncoderMaxTable(max: Int): Unit = { headerEncoder.setMaxTableSize(max) }
 
-  final def mkHeaderFrame(headers: Headers,
-                         streamId: Int,
-                         priority: Option[Priority],
-                      end_headers: Boolean,
-                       end_stream: Boolean,
-                          padding: Int): Seq[ByteBuffer] = {
+  final def mkHeaderFrame(streamId: Int,
+                          priority: Option[Priority],
+                       end_headers: Boolean,
+                        end_stream: Boolean,
+                           padding: Int,
+                           headers: Headers): Seq[ByteBuffer] = {
 
     val buffer = headerEncoder.encodeHeaders(headers)
 
