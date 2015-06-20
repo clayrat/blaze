@@ -5,7 +5,7 @@ import org.http4s.blaze.channel.ChannelHead
 import org.http4s.blaze.pipeline.Command._
 import org.http4s.blaze.util.BufferTools
 
-import scala.concurrent.{Promise, Future}
+import scala.concurrent.{TimeoutException, Promise, Future}
 
 import java.nio.channels._
 import java.nio.ByteBuffer
@@ -121,8 +121,9 @@ private[nio2] final class ByteBufferHead(channel: AsynchronousSocketChannel, buf
 
   override protected def closeWithError(t: Throwable): Unit = {
     t match {
-      case EOF => logger.debug(s"closeWithError(EOF)")
-      case t   => logger.error(t)("NIO2 channel closed with unexpected error")
+      case EOF                 => logger.debug(s"closeWithError(EOF)")
+      case t: TimeoutException => logger.debug(s"closeWithError($t)")
+      case t                   => logger.error(t)("NIO2 channel closed with unexpected error")
     }
 
     try channel.close()

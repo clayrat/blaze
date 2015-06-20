@@ -6,7 +6,7 @@ import scala.util.{Failure, Success, Try}
 import java.nio.ByteBuffer
 import java.nio.channels.{CancelledKeyException, SelectionKey, SelectableChannel}
 import java.util.concurrent.atomic.AtomicReference
-import scala.concurrent.{Future, Promise}
+import scala.concurrent.{TimeoutException, Future, Promise}
 import scala.util.control.NonFatal
 import org.http4s.blaze.pipeline.Command.{Disconnected, EOF}
 import org.http4s.blaze.util.BufferTools
@@ -157,7 +157,10 @@ private[nio1] abstract class NIO1HeadStage(ch: SelectableChannel,
 
   // Cleanup any read or write requests with the exception
   final override def closeWithError(t: Throwable): Unit = {
-    if (t != EOF) logger.warn(t)("Abnormal NIO1HeadStage termination")
+
+    if (t != EOF && !t.isInstanceOf[TimeoutException]) {
+      logger.warn(t)("Abnormal NIO1HeadStage termination")
+    }
 
     val r = readPromise.getAndSet(new PipeClosedPromise(t))
     if (r != null) r.tryFailure(t)
