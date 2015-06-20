@@ -1,6 +1,8 @@
 package org.http4s.blaze.pipeline.stages
 
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.{TimeoutException, TimeUnit}
+
+import org.http4s.blaze.pipeline.Command.{Error, OutboundCommand, InboundCommand}
 
 import scala.concurrent.duration.Duration
 import org.http4s.blaze.pipeline.{Command, HeadStage}
@@ -15,6 +17,16 @@ abstract class DelayHead[I](delay: Duration) extends HeadStage[I] {
   def name: String = "DelayHead"
 
   private val awaitingPromises = new mutable.HashSet[Promise[_]]()
+
+  override def outboundCommand(cmd: OutboundCommand): Unit = cmd match {
+    case Error(t: TimeoutException) =>
+      logger.info(s"$name received timeout")
+      awaitingPromises.synchronized {
+        awaitingPromises.foreach (_.tryFailure(t))
+      }
+
+    case cmd => super.outboundCommand(cmd)
+  }
 
   private def rememberPromise(p: Promise[_]): Unit = awaitingPromises.synchronized {
     awaitingPromises += p
@@ -37,8 +49,6 @@ abstract class DelayHead[I](delay: Duration) extends HeadStage[I] {
     }, delay.toNanos, TimeUnit.NANOSECONDS)
     p.future
   }
-
-
 
   override def writeRequest(data: I): Future[Unit] = {
     val p = Promise[Unit]

@@ -4,11 +4,13 @@ import java.nio.ByteBuffer
 
 import org.http4s.blaze.pipeline.Command
 
+import scala.concurrent.TimeoutException
 import scala.concurrent.duration._
 
 class QuietTimeoutStageSpec extends TimeoutHelpers {
 
-  override def genDelayStage(timeout: Duration): TimeoutStageBase[ByteBuffer] = new QuietTimeoutStage[ByteBuffer](timeout)
+  override def genDelayStage(timeout: Duration): TimeoutStageBase[ByteBuffer] =
+    new QuietTimeoutStage[ByteBuffer](timeout)
 
   "A QuietTimeoutStage" should {
     "not timeout with propper intervals" in {
@@ -21,11 +23,11 @@ class QuietTimeoutStageSpec extends TimeoutHelpers {
 
     "timeout properly" in {
       val pipe = makePipeline(delay = 10.seconds, timeout = 100.milliseconds)
-      checkFuture(pipe.channelRead(), 5.second) should throwA[Command.EOF.type]
+      checkFuture(pipe.channelRead(), 5.second) should throwA[TimeoutException]
     }
 
     "not timeout if the delay stage is removed" in {
-      val pipe = makePipeline(2.seconds, 1.second)
+      val pipe = makePipeline(delay = 2.seconds, timeout = 1.second)
       val f = pipe.channelRead()
       pipe.findOutboundStage(classOf[TimeoutStageBase[ByteBuffer]]).get.removeStage
       val r = checkFuture(f, 5.second)

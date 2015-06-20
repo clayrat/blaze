@@ -1,12 +1,11 @@
 package org.http4s.blaze.pipeline.stages
 
-import scala.concurrent.Future
+import scala.concurrent.{TimeoutException, Future}
 import scala.concurrent.duration.Duration
 import org.http4s.blaze.pipeline.MidStage
-import org.http4s.blaze.pipeline.Command.{ Disconnect, Disconnected }
+import org.http4s.blaze.pipeline.Command.Error
 import org.http4s.blaze.util.{ Cancellable, TickWheelExecutor }
 
-import org.http4s.blaze.util.Execution.scheduler
 import java.util.concurrent.atomic.AtomicReference
 
 abstract class TimeoutStageBase[T](timeout: Duration, exec: TickWheelExecutor) extends MidStage[T, T] { stage =>
@@ -22,8 +21,7 @@ abstract class TimeoutStageBase[T](timeout: Duration, exec: TickWheelExecutor) e
 
   private val killswitch = new Runnable {
     override def run(): Unit = {
-      sendOutboundCommand(Disconnect)
-      sendInboundCommand(Disconnected)
+      sendOutboundCommand(Error(new TimeoutException(s"Timeout after $timeout")))
     }
   }
 

@@ -2,6 +2,7 @@ package org.http4s.blaze.pipeline.stages
 
 import java.nio.ByteBuffer
 import org.http4s.blaze.pipeline.Command
+import scala.concurrent.TimeoutException
 import scala.concurrent.duration._
 
 
@@ -20,7 +21,7 @@ class CommandTimeoutStageSpec extends TimeoutHelpers {
     "timeout properly" in {
       val pipe = makePipeline(10.seconds, 100.milliseconds)
       pipe.sendOutboundCommand(CommandTimeoutStage.TimeoutBegin)
-      checkFuture(pipe.channelRead(), 5.second) should throwA[Command.EOF.type]
+      checkFuture(pipe.channelRead(), 5.second) should throwA[TimeoutException]
     }
 
     "cancel a timeout properly" in {
@@ -35,6 +36,7 @@ class CommandTimeoutStageSpec extends TimeoutHelpers {
 
     "not timeout if the delay stage is removed" in {
       val pipe = makePipeline(2.seconds, 1.second)
+      pipe.sendOutboundCommand(CommandTimeoutStage.TimeoutBegin)
       val f = pipe.channelRead()
       pipe.findOutboundStage(classOf[TimeoutStageBase[ByteBuffer]]).get.removeStage
       val r = checkFuture(f, 5.second)
